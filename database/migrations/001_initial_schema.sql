@@ -1,0 +1,15 @@
+-- =====================================================
+-- OMNICHANNEL AI CUSTOMER SUPPORT SYSTEM
+-- Migration: 001_initial_schema
+-- Purpose: Initial database schema
+-- Database: Supabase PostgreSQL
+-- =====================================================
+
+-- SECTION 1: Required Extensions
+-- SECTION 2: Custom Types and Enums
+-- SECTION 3: Tenant and Identity Tables
+-- SECTION 4: Chatbot and Channel Tables
+-- SECTION 5: Conversation Tables
+-- SECTION 6: Knowledge Base and RAG Tables
+-- SECTION 7: Helpdesk and Ticket Tables
+-- SECTION 8: AI Configuration and Observability Tables
