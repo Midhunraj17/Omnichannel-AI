@@ -23,458 +23,612 @@ import {
 
 import {
     reserveRequest,
-    completeRequest
+    completeRequest,
+    releaseRequest
 } from '../services/idempotency.service.js';
 
 
 const UUID_REGEX =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-
 const DEFAULT_DOMAIN = 'general';
 
 
+const findChatbot = async ({
+    chatbotId,
+    organizationId
+}) => {
+
+    const result = await pool.query(
+        `
+            SELECT id, organization_id
+            FROM public.chatbots
+            WHERE id = $1
+              AND organization_id = $2
+            LIMIT 1;
+        `,
+        [chatbotId, organizationId]
+    );
+
+    return result.rows[0] ?? null;
+};
+
+
+const getChatbotSettings = async (chatbotId) => {
+
+    const result = await pool.query(
+        `
+            SELECT settings, system_prompt
+            FROM public.chatbot_settings
+            WHERE chatbot_id = $1
+            LIMIT 1;
+        `,
+        [chatbotId]
+    );
+
+    return result.rows[0] ?? {};
+};
+
+
 // =====================================================
-// CHAT CONTROLLER
+// CHAT CONTROLLER FACTORY
 // =====================================================
 
-export const chatController = async (req, res, next) => {
+export const createChatController = ({
 
-    try {
+    findChatbotFn = findChatbot,
 
-        // -------------------------------------------------
-        // 1. VALIDATE IDEMPOTENCY KEY
-        // -------------------------------------------------
+    getChatbotSettingsFn = getChatbotSettings,
 
-        const requestId = req.get('Idempotency-Key');
+    getConversationFn = getConversation,
 
-        if (
-            typeof requestId !== 'string' ||
-            !UUID_REGEX.test(requestId)
-        ) {
-            return res.status(400).json({
-                success: false,
-                message: 'A valid Idempotency-Key UUID is required.'
-            });
-        }
+    createConversationFn = createConversation,
 
+    getConversationHistoryFn = getConversationHistory,
 
-        // -------------------------------------------------
-        // 2. VALIDATE REQUEST BODY
-        // -------------------------------------------------
+    saveConversationTurnFn = saveConversationTurn,
 
-        const {
-            message,
-            chatbot_id,
-            conversation_id = null
-        } = req.body ?? {};
+    generateAIResponseFn = generateAIResponse,
 
+    reserveRequestFn = reserveRequest,
 
-        if (
-            typeof message !== 'string' ||
-            !message.trim() ||
-            message.length > 10000
-        ) {
-            return res.status(400).json({
-                success: false,
-                message: 'A valid message is required.'
-            });
-        }
+    completeRequestFn = completeRequest,
 
+    releaseRequestFn = releaseRequest,
 
-        if (
-            typeof chatbot_id !== 'string' ||
-            !UUID_REGEX.test(chatbot_id)
-        ) {
-            return res.status(400).json({
-                success: false,
-                message: 'A valid chatbot ID is required.'
-            });
-        }
+    logAIUsageFn = logAIUsage,
 
+    calculateCohereCostFn = calculateCohereCost
 
-        if (
-            conversation_id !== null &&
-            (
-                typeof conversation_id !== 'string' ||
-                !UUID_REGEX.test(conversation_id)
-            )
-        ) {
-            return res.status(400).json({
-                success: false,
-                message: 'A valid conversation ID is required.'
-            });
-        }
+} = {}) => {
 
+    return async (req, res, next) => {
 
-        const normalizedMessage = message.trim();
+        let activeReservation = null;
 
 
         // -------------------------------------------------
-        // 3. VERIFY CHATBOT OWNERSHIP
+        // RELEASE FAILED RESERVATIONS
         // -------------------------------------------------
 
-        const chatbotResult = await pool.query(
-            `
-                SELECT
-                    id,
-                    organization_id
-                FROM public.chatbots
-                WHERE id = $1
-                  AND organization_id = $2
-                LIMIT 1;
-            `,
-            [
-                chatbot_id,
-                req.organization.id
-            ]
-        );
+        const releaseActiveReservation = async () => {
+
+            if (!activeReservation) {
+                return;
+            }
+
+            const reservation = activeReservation;
+
+            activeReservation = null;
+
+            try {
+
+                await releaseRequestFn(reservation);
+
+            } catch (error) {
+
+                console.error(
+                    'Unable to release idempotency reservation:',
+                    error.message
+                );
+
+            }
+
+        };
 
 
-        if (chatbotResult.rowCount === 0) {
-            return res.status(404).json({
-                success: false,
-                message: 'Chatbot not found.'
-            });
-        }
+        try {
 
+            // -------------------------------------------------
+            // 1. ORGANIZATION CONTEXT
+            // -------------------------------------------------
 
-        const chatbot = chatbotResult.rows[0];
+            if (!req.organization?.id) {
 
-
-        // -------------------------------------------------
-        // 4. GENERATE REQUEST HASH
-        // -------------------------------------------------
-
-        const requestHash = createHash('sha256')
-            .update(JSON.stringify({
-                message: normalizedMessage,
-                chatbotId: chatbot.id,
-                conversationId: conversation_id
-            }))
-            .digest('hex');
-
-
-        // -------------------------------------------------
-        // 5. RESERVE IDEMPOTENCY REQUEST
-        // -------------------------------------------------
-
-        const reservation = await reserveRequest({
-
-            organizationId: chatbot.organization_id,
-
-            chatbotId: chatbot.id,
-
-            idempotencyKey: requestId,
-
-            requestHash
-
-        });
-
-
-        // -------------------------------------------------
-        // 6. HANDLE EXISTING REQUESTS
-        // -------------------------------------------------
-
-        if (reservation.state === 'completed') {
-
-            return res
-                .status(reservation.responseStatus)
-                .json(reservation.responseBody);
-
-        }
-
-
-        if (reservation.state === 'conflict') {
-
-            return res.status(409).json({
-                success: false,
-                message:
-                    'This Idempotency-Key has already been used with a different request.'
-            });
-
-        }
-
-
-        if (reservation.state === 'processing') {
-
-            res.set('Retry-After', '3');
-
-            return res.status(409).json({
-                success: false,
-                message: 'This request is already being processed.',
-                retryable: true
-            });
-
-        }
-
-
-        if (reservation.state !== 'reserved') {
-
-            throw new Error(
-                'Unexpected idempotency reservation state.'
-            );
-
-        }
-
-
-        // -------------------------------------------------
-        // 7. GET OR CREATE CONVERSATION
-        // -------------------------------------------------
-
-        let conversation;
-
-
-        if (conversation_id) {
-
-            conversation = await getConversation({
-
-                conversationId: conversation_id,
-
-                organizationId: chatbot.organization_id,
-
-                chatbotId: chatbot.id
-
-            });
-
-
-            if (!conversation) {
-
-                return res.status(404).json({
+                return res.status(500).json({
                     success: false,
-                    message:
-                        'Conversation not found or does not belong to this chatbot.'
+                    message: 'Organization context is missing.'
                 });
 
             }
 
-        } else {
 
-            conversation = await createConversation({
+            // -------------------------------------------------
+            // 2. IDEMPOTENCY VALIDATION
+            // -------------------------------------------------
 
-                organizationId: chatbot.organization_id,
+            const requestId =
+                req.get('Idempotency-Key');
 
-                chatbotId: chatbot.id
+            if (
+                typeof requestId !== 'string' ||
+                !UUID_REGEX.test(requestId)
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    message: 'A valid Idempotency-Key UUID is required.'
+                });
+
+            }
+
+
+            // -------------------------------------------------
+            // 3. REQUEST VALIDATION
+            // -------------------------------------------------
+
+            const {
+                message,
+                chatbot_id,
+                conversation_id = null
+            } = req.body ?? {};
+
+
+            if (
+                typeof message !== 'string' ||
+                !message.trim() ||
+                message.length > 10000
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    message: 'A valid message is required.'
+                });
+
+            }
+
+
+            if (
+                typeof chatbot_id !== 'string' ||
+                !UUID_REGEX.test(chatbot_id)
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    message: 'A valid chatbot ID is required.'
+                });
+
+            }
+
+
+            if (
+                conversation_id !== null &&
+                (
+                    typeof conversation_id !== 'string' ||
+                    !UUID_REGEX.test(conversation_id)
+                )
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    message: 'A valid conversation ID is required.'
+                });
+
+            }
+
+
+            const normalizedMessage = message.trim();
+
+
+            // -------------------------------------------------
+            // 4. VERIFY CHATBOT TENANT OWNERSHIP
+            // -------------------------------------------------
+
+            const chatbot = await findChatbotFn({
+
+                chatbotId: chatbot_id,
+
+                organizationId: req.organization.id
 
             });
 
-        }
+
+            if (!chatbot) {
+
+                return res.status(404).json({
+                    success: false,
+                    message: 'Chatbot not found.'
+                });
+
+            }
 
 
-        // -------------------------------------------------
-        // 8. LOAD TRUSTED CONVERSATION HISTORY
-        // -------------------------------------------------
+            // -------------------------------------------------
+            // 5. REQUEST HASH
+            // -------------------------------------------------
 
-        const history = await getConversationHistory({
+            const requestHash = createHash('sha256')
+                .update(JSON.stringify({
 
-            conversationId: conversation.id,
+                    message: normalizedMessage,
 
-            organizationId: chatbot.organization_id,
+                    chatbotId: chatbot.id,
 
-            chatbotId: chatbot.id,
+                    conversationId: conversation_id
 
-            limit: 100
-
-        });
-
-
-        // -------------------------------------------------
-        // 9. LOAD CHATBOT SETTINGS
-        // -------------------------------------------------
-
-        const settingsResult = await pool.query(
-            `
-                SELECT
-                    settings,
-                    system_prompt
-                FROM public.chatbot_settings
-                WHERE chatbot_id = $1
-                LIMIT 1;
-            `,
-            [chatbot.id]
-        );
+                }))
+                .digest('hex');
 
 
-        const chatbotSettings =
-            settingsResult.rows[0] ?? {};
+            // -------------------------------------------------
+            // 6. RESERVE IDEMPOTENCY KEY
+            // -------------------------------------------------
+
+            const reservation = await reserveRequestFn({
+
+                organizationId: chatbot.organization_id,
+
+                chatbotId: chatbot.id,
+
+                idempotencyKey: requestId,
+
+                requestHash
+
+            });
 
 
-        const settings =
-            chatbotSettings.settings ?? {};
+            // -------------------------------------------------
+            // 7. HANDLE EXISTING REQUEST
+            // -------------------------------------------------
+
+            if (reservation.state === 'completed') {
+
+                return res
+                    .status(reservation.responseStatus)
+                    .json(reservation.responseBody);
+
+            }
 
 
-        const domain =
-            settings.domain ?? DEFAULT_DOMAIN;
+            if (reservation.state === 'conflict') {
+
+                return res.status(409).json({
+
+                    success: false,
+
+                    message:
+                        'This Idempotency-Key has already been used with a different request.'
+
+                });
+
+            }
 
 
-        const requiredEntities =
-            settings.required_entities ?? [];
+            if (reservation.state === 'processing') {
+
+                res.set('Retry-After', '3');
+
+                return res.status(409).json({
+
+                    success: false,
+
+                    message: 'This request is already being processed.',
+
+                    retryable: true
+
+                });
+
+            }
 
 
-        // -------------------------------------------------
-        // 10. GENERATE AI RESPONSE
-        // -------------------------------------------------
+            if (reservation.state !== 'reserved') {
 
-        const result = await generateAIResponse({
+                throw new Error(
+                    'Unexpected idempotency reservation state.'
+                );
 
-            message: normalizedMessage,
-
-            history,
-
-            domain,
-
-            requiredEntities
-
-        });
+            }
 
 
-        // -------------------------------------------------
-        // 11. PERSIST CUSTOMER + BOT MESSAGES ATOMICALLY
-        // -------------------------------------------------
+            activeReservation = {
 
-        const botResponse =
-            typeof result.response === 'string' &&
-            result.response.trim()
-                ? result.response.trim()
-                : null;
+                reservationId: reservation.id,
+
+                reservationToken: reservation.reservationToken
+
+            };
 
 
-        await saveConversationTurn({
+            // -------------------------------------------------
+            // 8. GET OR CREATE CONVERSATION
+            // -------------------------------------------------
 
-            conversationId: conversation.id,
-
-            organizationId: chatbot.organization_id,
-
-            chatbotId: chatbot.id,
-
-            idempotencyKey: requestId,
-
-            customerMessage: normalizedMessage,
-
-            botResponse
-
-        });
+            let conversation;
 
 
-        // -------------------------------------------------
-        // 12. LOG COHERE USAGE
-        // -------------------------------------------------
+            if (conversation_id) {
 
-        if (
-            result.status === 'response_generated' &&
-            result.model &&
-            result.usage
-        ) {
+                conversation = await getConversationFn({
 
-            try {
+                    conversationId: conversation_id,
 
-                const usage = result.usage;
+                    organizationId: chatbot.organization_id,
 
-
-                const pricing = calculateCohereCost({
-
-                    modelName: result.model,
-
-                    inputTokens:
-                        usage.billed_input_tokens ??
-                        usage.input_tokens ??
-                        0,
-
-                    outputTokens:
-                        usage.billed_output_tokens ??
-                        usage.output_tokens ??
-                        0
+                    chatbotId: chatbot.id
 
                 });
 
 
-                await logAIUsage({
+                if (!conversation) {
+
+                    await releaseActiveReservation();
+
+                    return res.status(404).json({
+
+                        success: false,
+
+                        message:
+                            'Conversation not found or does not belong to this chatbot.'
+
+                    });
+
+                }
+
+            } else {
+
+                conversation = await createConversationFn({
+
+                    organizationId: chatbot.organization_id,
+
+                    chatbotId: chatbot.id
+
+                });
+
+            }
+
+
+            // -------------------------------------------------
+            // 9. LOAD TRUSTED CONVERSATION HISTORY
+            // -------------------------------------------------
+
+            const history = await getConversationHistoryFn({
+
+                conversationId: conversation.id,
+
+                organizationId: chatbot.organization_id,
+
+                chatbotId: chatbot.id,
+
+                limit: 100
+
+            });
+
+
+            // -------------------------------------------------
+            // 10. LOAD CHATBOT SETTINGS
+            // -------------------------------------------------
+
+            const chatbotSettings =
+                await getChatbotSettingsFn(chatbot.id);
+
+            const settings =
+                chatbotSettings?.settings ?? {};
+
+            const domain =
+                settings.domain ?? DEFAULT_DOMAIN;
+
+            const requiredEntities =
+                settings.required_entities ?? [];
+
+
+            // -------------------------------------------------
+            // 11. GENERATE AI RESPONSE
+            // -------------------------------------------------
+
+            const result = await generateAIResponseFn({
+
+                message: normalizedMessage,
+
+                history,
+
+                domain,
+
+                requiredEntities
+
+            });
+
+
+            if (
+                !result ||
+                typeof result !== 'object' ||
+                typeof result.status !== 'string'
+            ) {
+
+                throw new Error(
+                    'AI service returned an invalid response.'
+                );
+
+            }
+
+
+            // -------------------------------------------------
+            // 12. PERSIST CONVERSATION TURN
+            // -------------------------------------------------
+
+            const botResponse =
+                typeof result.response === 'string' &&
+                result.response.trim()
+                    ? result.response.trim()
+                    : null;
+
+
+            const persistedTurn =
+                await saveConversationTurnFn({
+
+                    conversationId: conversation.id,
 
                     organizationId: chatbot.organization_id,
 
                     chatbotId: chatbot.id,
 
-                    requestId,
+                    idempotencyKey: requestId,
 
-                    provider: 'cohere',
+                    customerMessage: normalizedMessage,
 
-                    modelName: result.model,
-
-                    inputTokens:
-                        usage.input_tokens ?? 0,
-
-                    outputTokens:
-                        usage.output_tokens ?? 0,
-
-                    billedInputTokens:
-                        usage.billed_input_tokens ?? null,
-
-                    billedOutputTokens:
-                        usage.billed_output_tokens ?? null,
-
-                    inputCost: pricing.inputCost,
-
-                    outputCost: pricing.outputCost,
-
-                    costCurrency: pricing.currency,
-
-                    pricingVersion: pricing.pricingVersion
+                    botResponse
 
                 });
 
-            } catch (loggingError) {
 
-                console.error(
-                    'AI Usage Logging Failed:',
-                    loggingError.message
-                );
+            // -------------------------------------------------
+            // 13. LOG AI USAGE
+            // -------------------------------------------------
+
+            if (
+                result.status === 'response_generated' &&
+                result.model &&
+                result.usage
+            ) {
+
+                try {
+
+                    const usage = result.usage;
+
+                    const pricing = calculateCohereCostFn({
+
+                        modelName: result.model,
+
+                        inputTokens:
+                            usage.billed_input_tokens ??
+                            usage.input_tokens ??
+                            0,
+
+                        outputTokens:
+                            usage.billed_output_tokens ??
+                            usage.output_tokens ??
+                            0
+
+                    });
+
+
+                    await logAIUsageFn({
+
+                        organizationId: chatbot.organization_id,
+
+                        chatbotId: chatbot.id,
+
+                        requestId,
+
+                        provider: 'cohere',
+
+                        modelName: result.model,
+
+                        inputTokens:
+                            usage.input_tokens ?? 0,
+
+                        outputTokens:
+                            usage.output_tokens ?? 0,
+
+                        billedInputTokens:
+                            usage.billed_input_tokens ?? null,
+
+                        billedOutputTokens:
+                            usage.billed_output_tokens ?? null,
+
+                        inputCost: pricing.inputCost,
+
+                        outputCost: pricing.outputCost,
+
+                        costCurrency: pricing.currency,
+
+                        pricingVersion: pricing.pricingVersion
+
+                    });
+
+                } catch (loggingError) {
+
+                    console.error(
+                        'AI usage logging failed:',
+                        loggingError.message
+                    );
+
+                }
 
             }
 
+
+            // -------------------------------------------------
+            // 14. BUILD RESPONSE
+            // -------------------------------------------------
+
+            const persistedBotResponse =
+                persistedTurn?.botMessage?.content;
+
+            const responseBody = {
+
+                ...result,
+
+                ...(persistedBotResponse
+                    ? { response: persistedBotResponse }
+                    : {}),
+
+                conversation_id: conversation.id
+
+            };
+
+
+            // -------------------------------------------------
+            // 15. COMPLETE IDEMPOTENCY REQUEST
+            // -------------------------------------------------
+
+            await completeRequestFn({
+
+                reservationId: reservation.id,
+
+                reservationToken: reservation.reservationToken,
+
+                responseBody,
+
+                responseStatus: 200
+
+            });
+
+
+            activeReservation = null;
+
+
+            // -------------------------------------------------
+            // 16. RETURN RESPONSE
+            // -------------------------------------------------
+
+            return res.status(200).json(responseBody);
+
+
+        } catch (error) {
+
+            await releaseActiveReservation();
+
+            return next(error);
+
         }
 
-
-        // -------------------------------------------------
-        // 13. BUILD RESPONSE
-        // -------------------------------------------------
-
-        const responseBody = {
-
-            ...result,
-
-            conversation_id: conversation.id
-
-        };
-
-
-        // -------------------------------------------------
-        // 14. CACHE IDEMPOTENT RESPONSE
-        // -------------------------------------------------
-
-        await completeRequest({
-
-            reservationId: reservation.id,
-
-            reservationToken: reservation.reservationToken,
-
-            responseBody,
-
-            responseStatus: 200
-
-        });
-
-
-        // -------------------------------------------------
-        // 15. RETURN RESPONSE
-        // -------------------------------------------------
-
-        return res.status(200).json(responseBody);
-
-
-    } catch (error) {
-
-        next(error);
-
-    }
+    };
 
 };
+
+
+// =====================================================
+// PRODUCTION CONTROLLER
+// =====================================================
+
+export const chatController = createChatController();

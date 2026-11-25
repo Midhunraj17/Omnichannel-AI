@@ -17,20 +17,46 @@ import {
 } from '../middleware/resource-authorization.middleware.js';
 
 
-const router = express.Router();
+// =====================================================
+// AI ROUTER FACTORY
+// =====================================================
+
+export const createAiRouter = ({
+
+    authenticateUserMiddleware = authenticateUser,
+
+    requireOrganizationMiddleware = requireOrganization,
+
+    requireChatbotTenantAccessMiddleware =
+        requireChatbotTenantAccess,
+
+    chatControllerFn = chatController
+
+} = {}) => {
+
+    const router = express.Router();
 
 
-router.post(
-    '/chat',
+    router.post(
+        '/chat',
 
-    authenticateUser,
+        authenticateUserMiddleware,
 
-    requireOrganization,
+        requireOrganizationMiddleware,
 
-    requireChatbotTenantAccess,
+        requireChatbotTenantAccessMiddleware,
 
-    chatController
-);
+        chatControllerFn
+    );
 
 
-export default router;
+    return router;
+
+};
+
+
+// =====================================================
+// PRODUCTION ROUTER
+// =====================================================
+
+export default createAiRouter();

@@ -1,4 +1,5 @@
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,14 +21,21 @@ class Settings:
         "ENVIRONMENT",
         "development"
     )
-        # Internal service authentication
-    AI_SERVICE_API_KEY = "ikRjuRFOwLrZwqe20z3Nq7vhJkgpFiQMOn7R8zhTiu6weY7HlFyiJ_BF_zWvyuAF"
 
-    PORT = int(os.getenv("PORT", 8000))
+    # Internal service authentication
+    AI_SERVICE_API_KEY = os.getenv(
+        "AI_SERVICE_API_KEY"
+    )
+
+    PORT = int(
+        os.getenv("PORT", 8000)
+    )
 
     # Cohere Configuration
 
-    COHERE_API_KEY = os.getenv("COHERE_API_KEY")
+    COHERE_API_KEY = os.getenv(
+        "COHERE_API_KEY"
+    )
 
     COHERE_CHAT_MODEL = os.getenv(
         "COHERE_CHAT_MODEL",
@@ -47,13 +55,32 @@ class Settings:
     COHERE_EMBED_DIMENSION = int(
         os.getenv("COHERE_EMBED_DIMENSION", 1024)
     )
-        # Cohere integration settings
-    COHERE_TIMEOUT_SECONDS = float(os.getenv("COHERE_TIMEOUT_SECONDS", 30))
-    COHERE_MAX_RETRIES = int(os.getenv("COHERE_MAX_RETRIES", 2))
-    COHERE_RETRY_BASE_SECONDS = float(os.getenv("COHERE_RETRY_BASE_SECONDS", 0.5))
-    COHERE_RETRY_MAX_SECONDS = float(os.getenv("COHERE_RETRY_MAX_SECONDS", 4))
-    COHERE_MAX_TOKENS = int(os.getenv("COHERE_MAX_TOKENS", 800))
-    COHERE_TEMPERATURE = float(os.getenv("COHERE_TEMPERATURE", 0.3))
+
+    # Cohere integration settings
+
+    COHERE_TIMEOUT_SECONDS = float(
+        os.getenv("COHERE_TIMEOUT_SECONDS", 30)
+    )
+
+    COHERE_MAX_RETRIES = int(
+        os.getenv("COHERE_MAX_RETRIES", 2)
+    )
+
+    COHERE_RETRY_BASE_SECONDS = float(
+        os.getenv("COHERE_RETRY_BASE_SECONDS", 0.5)
+    )
+
+    COHERE_RETRY_MAX_SECONDS = float(
+        os.getenv("COHERE_RETRY_MAX_SECONDS", 4)
+    )
+
+    COHERE_MAX_TOKENS = int(
+        os.getenv("COHERE_MAX_TOKENS", 800)
+    )
+
+    COHERE_TEMPERATURE = float(
+        os.getenv("COHERE_TEMPERATURE", 0.3)
+    )
 
 
 settings = Settings()

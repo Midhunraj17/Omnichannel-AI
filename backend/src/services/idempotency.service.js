@@ -6,6 +6,10 @@ import { pool } from '../config/database.js';
 const LEASE_DURATION_SECONDS = 120;
 
 
+// =====================================================
+// RESERVE REQUEST
+// =====================================================
+
 export const reserveRequest = async ({
     organizationId,
     chatbotId,
@@ -56,6 +60,7 @@ export const reserveRequest = async ({
             ]
         );
 
+
         if (insertResult.rowCount === 1) {
 
             await client.query('COMMIT');
@@ -68,13 +73,14 @@ export const reserveRequest = async ({
 
         }
 
+
         const existingResult = await client.query(
             `
                 SELECT *
                 FROM public.api_idempotency_keys
                 WHERE organization_id = $1
-                AND chatbot_id = $2
-                AND idempotency_key = $3
+                  AND chatbot_id = $2
+                  AND idempotency_key = $3
                 FOR UPDATE;
             `,
             [
@@ -84,13 +90,18 @@ export const reserveRequest = async ({
             ]
         );
 
+
         if (existingResult.rowCount === 0) {
+
             throw new Error(
                 'Unable to retrieve idempotency reservation.'
             );
+
         }
 
+
         const existing = existingResult.rows[0];
+
 
         if (existing.request_hash !== requestHash) {
 
@@ -101,6 +112,7 @@ export const reserveRequest = async ({
             };
 
         }
+
 
         if (new Date(existing.expires_at) <= new Date()) {
 
@@ -138,6 +150,7 @@ export const reserveRequest = async ({
 
         }
 
+
         if (existing.status === 'completed') {
 
             await client.query('COMMIT');
@@ -149,6 +162,7 @@ export const reserveRequest = async ({
             };
 
         }
+
 
         if (
             existing.status === 'processing' &&
@@ -184,26 +198,28 @@ export const reserveRequest = async ({
 
         }
 
+
         await client.query('COMMIT');
 
         return {
             state: 'processing'
         };
 
+
     } catch (error) {
 
-    try {
-        await client.query('ROLLBACK');
-    } catch (rollbackError) {
-        console.error(
-            'Idempotency transaction rollback failed:',
-            rollbackError.message
-        );
-    }
+        try {
+            await client.query('ROLLBACK');
+        } catch (rollbackError) {
+            console.error(
+                'Idempotency rollback failed:',
+                rollbackError.message
+            );
+        }
 
-    throw error;
+        throw error;
 
-} finally {
+    } finally {
 
         client.release();
 
@@ -211,6 +227,10 @@ export const reserveRequest = async ({
 
 };
 
+
+// =====================================================
+// COMPLETE REQUEST
+// =====================================================
 
 export const completeRequest = async ({
     reservationId,
@@ -230,8 +250,8 @@ export const completeRequest = async ({
                 lease_expires_at = NULL,
                 updated_at = NOW()
             WHERE id = $1
-            AND reservation_token = $2
-            AND status = 'processing'
+              AND reservation_token = $2
+              AND status = 'processing'
             RETURNING id;
         `,
         [
@@ -242,6 +262,7 @@ export const completeRequest = async ({
         ]
     );
 
+
     if (result.rowCount !== 1) {
 
         throw new Error(
@@ -250,6 +271,7 @@ export const completeRequest = async ({
 
     }
 
+
     return {
         success: true,
         reservationId: result.rows[0].id
@@ -257,6 +279,44 @@ export const completeRequest = async ({
 
 };
 
+
+// =====================================================
+// RELEASE FAILED REQUEST
+// =====================================================
+
+export const releaseRequest = async ({
+    reservationId,
+    reservationToken
+}) => {
+
+    const result = await pool.query(
+        `
+            UPDATE public.api_idempotency_keys
+            SET
+                lease_expires_at = NOW(),
+                updated_at = NOW()
+            WHERE id = $1
+              AND reservation_token = $2
+              AND status = 'processing'
+            RETURNING id;
+        `,
+        [
+            reservationId,
+            reservationToken
+        ]
+    );
+
+
+    return {
+        released: result.rowCount === 1
+    };
+
+};
+
+
+// =====================================================
+// GET CACHED RESPONSE
+// =====================================================
 
 export const getCachedResponse = async ({
     organizationId,
@@ -271,10 +331,10 @@ export const getCachedResponse = async ({
                 response_status
             FROM public.api_idempotency_keys
             WHERE organization_id = $1
-            AND chatbot_id = $2
-            AND idempotency_key = $3
-            AND status = 'completed'
-            AND expires_at > NOW()
+              AND chatbot_id = $2
+              AND idempotency_key = $3
+              AND status = 'completed'
+              AND expires_at > NOW()
             LIMIT 1;
         `,
         [
@@ -284,9 +344,11 @@ export const getCachedResponse = async ({
         ]
     );
 
+
     if (result.rowCount === 0) {
         return null;
     }
+
 
     return {
         responseBody: result.rows[0].response_body,
@@ -294,6 +356,11 @@ export const getCachedResponse = async ({
     };
 
 };
+
+
+// =====================================================
+// RENEW RESERVATION
+// =====================================================
 
 export const renewReservation = async ({
     reservationId,
@@ -308,8 +375,8 @@ export const renewReservation = async ({
                     NOW() + ($3 * INTERVAL '1 second'),
                 updated_at = NOW()
             WHERE id = $1
-            AND reservation_token = $2
-            AND status = 'processing'
+              AND reservation_token = $2
+              AND status = 'processing'
             RETURNING id;
         `,
         [
@@ -319,14 +386,19 @@ export const renewReservation = async ({
         ]
     );
 
+
     if (result.rowCount !== 1) {
+
         throw new Error(
             'Unable to renew reservation: ownership lost.'
         );
+
     }
+
 
     return {
         success: true,
         reservationId: result.rows[0].id
     };
+
 };
