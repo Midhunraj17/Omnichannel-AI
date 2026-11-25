@@ -13,14 +13,27 @@ import {
     requireRoles
 } from '../middleware/organization.middleware.js';
 
+import {
+    requireAssignedConversationAccess
+} from '../middleware/resource-authorization.middleware.js';
+
+
 const router = express.Router();
+
 
 router.post(
     '/:chatbotId/:conversationId/messages',
+
     authenticateUser,
+
     requireOrganization,
+
     requireRoles('support_agent'),
+
+    requireAssignedConversationAccess,
+
     sendAgentMessageController
 );
+
 
 export default router;
