@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field, field_validator
 from app.schemas.entities import EntityDomain, EntityExtractionResponse
 from app.schemas.intent import IntentClassificationResponse
 from app.schemas.routing import RoutingDestination, RoutingResponse
+from app.schemas.ticket_triage import TicketTriageResult
 
 import logging
 
@@ -64,6 +65,7 @@ class OrchestrationResponse(BaseModel):
     intent: IntentClassificationResponse
     entities: EntityExtractionResponse
     routing: RoutingResponse
+    ticket_triage: TicketTriageResult | None = None
     response: str | None = None
     model: str | None = None
     finish_reason: str | None = None
