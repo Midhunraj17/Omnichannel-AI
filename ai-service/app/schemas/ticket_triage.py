@@ -16,6 +16,7 @@ TicketCategory = Literal[
     "OTHER",
 ]
 
+
 TicketPriority = Literal[
     "P1_CRITICAL",
     "P2_HIGH",
@@ -23,11 +24,21 @@ TicketPriority = Literal[
     "P4_LOW",
 ]
 
+
 TicketSentiment = Literal[
     "NEGATIVE",
     "NEUTRAL",
     "POSITIVE",
 ]
+
+
+TicketSeverity = Literal[
+    "CRITICAL",
+    "HIGH",
+    "MEDIUM",
+    "LOW",
+]
+
 
 ClassificationMethod = Literal[
     "rules",
@@ -57,10 +68,10 @@ class TicketIssueClassification(BaseModel):
 
 class TicketTriageResult(BaseModel):
     """
-    Classification and triage metadata.
+    Classification and priority assessment.
 
-    This schema does not execute business operations,
-    create tickets, or assign support agents.
+    This model describes the assessment only.
+    It does not execute ticket assignment or escalation.
     """
 
     applicable: bool = True
@@ -79,17 +90,27 @@ class TicketTriageResult(BaseModel):
         le=100
     )
 
-    severity: Literal[
-        "CRITICAL",
-        "HIGH",
-        "MEDIUM",
-        "LOW"
-    ]
+    severity: TicketSeverity
+
+    impact_level: int = Field(
+        ge=1,
+        le=5
+    )
+
+    urgency_level: int = Field(
+        ge=1,
+        le=5
+    )
 
     sentiment: TicketSentiment
 
     urgency_signals: list[str] = Field(
         default_factory=list
+    )
+
+    priority_reason_codes: list[str] = Field(
+        default_factory=list,
+        max_length=30
     )
 
     reason: str = Field(
@@ -115,6 +136,18 @@ class TicketTriageResult(BaseModel):
     )
 
     requires_human_review: bool = False
+
+    escalation_required: bool = False
+
+    first_response_sla_hours: int = Field(
+        ge=1,
+        le=720
+    )
+
+    resolution_sla_hours: int = Field(
+        ge=1,
+        le=720
+    )
 
     suggested_sla_hours: int = Field(
         ge=1,

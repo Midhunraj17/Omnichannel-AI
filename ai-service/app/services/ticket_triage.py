@@ -1,9 +1,6 @@
-"""Advanced hybrid support-ticket classification and triage."""
-
 from __future__ import annotations
 
 import re
-
 from collections.abc import Iterable
 
 from app.schemas.ticket_triage import (
@@ -11,13 +8,16 @@ from app.schemas.ticket_triage import (
     TicketTriageResult,
 )
 
+from app.services.ticket_priority import (
+    assess_ticket_priority,
+)
 
-# =====================================================
-# INTENT → CATEGORY MAPPING
-# =====================================================
+
+# =========================================================
+# INTENT MAPPING
+# =========================================================
 
 CATEGORY_BY_INTENT = {
-
     "ORDER_TRACKING": "ORDER",
     "ORDER_STATUS": "ORDER",
     "CANCELLATION_REQUEST": "ORDER",
@@ -43,16 +43,10 @@ CATEGORY_BY_INTENT = {
     "TICKET_STATUS": "OTHER",
 }
 
-
 SUPPORT_INTENTS = set(CATEGORY_BY_INTENT)
 
 
-# =====================================================
-# SUBCATEGORY TAXONOMY
-# =====================================================
-
 SUBCATEGORY_BY_INTENT = {
-
     "ORDER_TRACKING": "tracking",
     "ORDER_STATUS": "status",
     "CANCELLATION_REQUEST": "cancellation",
@@ -79,12 +73,11 @@ SUBCATEGORY_BY_INTENT = {
 }
 
 
-# =====================================================
-# KEYWORD LABELS
-# =====================================================
+# =========================================================
+# LABEL RULES
+# =========================================================
 
 LABEL_RULES = {
-
     "payment": [
         "payment",
         "transaction",
@@ -121,6 +114,7 @@ LABEL_RULES = {
     "technical": [
         "bug",
         "crash",
+        "crashing",
         "error",
         "not working",
         "api",
@@ -144,39 +138,12 @@ LABEL_RULES = {
         "unacceptable",
         "disappointed",
     ],
-
 }
 
 
-# =====================================================
-# PRIORITY SIGNALS
-# =====================================================
-
-_CRITICAL_TERMS = (
-    "account hacked",
-    "data breach",
-    "security breach",
-    "fraud",
-    "unauthorized access",
-    "business is down",
-    "system is down",
-    "payment fraud",
-)
-
-_HIGH_TERMS = (
-    "urgent",
-    "immediately",
-    "asap",
-    "right now",
-    "multiple times",
-    "charged twice",
-    "money deducted",
-    "service unavailable",
-    "completely broken",
-    "cannot work",
-    "deadline",
-    "service is unavailable",
-)
+# =========================================================
+# SENTIMENT RULES
+# =========================================================
 
 _NEGATIVE_TERMS = (
     "angry",
@@ -205,48 +172,41 @@ _POSITIVE_TERMS = (
 )
 
 
-_SLA_HOURS = {
-
-    "P1_CRITICAL": 1,
-    "P2_HIGH": 4,
-    "P3_NORMAL": 24,
-    "P4_LOW": 72,
-
-}
-
-
-# =====================================================
+# =========================================================
 # TEXT UTILITIES
-# =====================================================
+# =========================================================
 
 def _normalize(text: str) -> str:
+    """Normalize text for deterministic keyword matching."""
 
     return re.sub(
         r"\s+",
         " ",
-        text.casefold()
+        text.casefold(),
     ).strip()
 
 
 def _contains(text: str, phrase: str) -> bool:
+    """Match a phrase without matching partial words."""
 
     pattern = re.escape(
         phrase.casefold()
     ).replace(
         r"\ ",
-        r"\s+"
+        r"\s+",
     )
 
     return re.search(
         rf"(?<!\w){pattern}(?!\w)",
-        text
+        text,
     ) is not None
 
 
 def _matching_terms(
     text: str,
-    terms: Iterable[str]
+    terms: Iterable[str],
 ) -> list[str]:
+    """Return all matching terms."""
 
     return [
         term
@@ -255,45 +215,43 @@ def _matching_terms(
     ]
 
 
-# =====================================================
-# SENTIMENT CLASSIFICATION
-# =====================================================
+# =========================================================
+# SENTIMENT ANALYSIS
+# =========================================================
 
 def _sentiment(text: str) -> str:
+    """Determine basic rule-based customer sentiment."""
 
     negative = _matching_terms(
         text,
-        _NEGATIVE_TERMS
+        _NEGATIVE_TERMS,
     )
 
     positive = _matching_terms(
         text,
-        _POSITIVE_TERMS
+        _POSITIVE_TERMS,
     )
 
     if negative and len(negative) >= len(positive):
-
         return "NEGATIVE"
 
     if positive and not negative:
-
         return "POSITIVE"
 
     return "NEUTRAL"
 
 
-# =====================================================
+# =========================================================
 # LABEL EXTRACTION
-# =====================================================
+# =========================================================
 
 def _extract_labels(
     text: str,
-    category: str | None = None
+    category: str | None = None,
 ) -> list[str]:
+    """Extract deterministic labels from ticket content."""
 
     labels = []
-
-    # Extract keyword-based labels.
 
     for label, terms in LABEL_RULES.items():
 
@@ -301,87 +259,73 @@ def _extract_labels(
             _contains(text, term)
             for term in terms
         ):
-
             labels.append(label)
-
-    # Add the classification category as a label.
 
     if category:
 
         category_label = category.casefold()
 
         if category_label not in labels:
-
             labels.append(category_label)
 
-    # Remove duplicates while preserving order.
-
+    # Remove duplicates while preserving insertion order.
     return list(dict.fromkeys(labels))[:20]
 
 
-# =====================================================
-# CATEGORY CLASSIFICATION
-# =====================================================
+# =========================================================
+# ISSUE CLASSIFICATION
+# =========================================================
 
 def _classify_issue(
     intent: str,
     intent_confidence: float,
     text: str,
 ) -> TicketIssueClassification:
+    """Convert an intent into a structured issue classification."""
 
     category = CATEGORY_BY_INTENT.get(
         intent,
-        "OTHER"
+        "OTHER",
     )
 
     subcategory = SUBCATEGORY_BY_INTENT.get(
         intent,
-        "general_support"
+        "general_support",
     )
 
     labels = _extract_labels(
         text,
-        category
+        category,
     )
 
     confidence = max(
         0.0,
-        min(1.0, intent_confidence)
+        min(1.0, intent_confidence),
     )
 
-    # A recognized intent provides the base category.
-    # Explicit keyword matches strengthen the result.
-
     if labels:
-
         confidence = min(
             0.99,
-            confidence + 0.03
+            confidence + 0.03,
         )
 
     if intent in {"UNKNOWN", "AMBIGUOUS"}:
-
         confidence = min(
             confidence,
-            0.30
+            0.30,
         )
 
     return TicketIssueClassification(
-
         category=category,
-
         subcategory=subcategory,
-
         confidence=confidence,
-
-        labels=labels
-
+        labels=labels,
     )
 
 
-# =====================================================
-# MAIN CLASSIFICATION ENGINE
-# =====================================================
+# =========================================================
+# MAIN TICKET TRIAGE ENGINE
+# =========================================================
 
 def triage_ticket(
     *,
@@ -391,27 +335,25 @@ def triage_ticket(
     intent_confidence: float = 0.90,
     intent_method: str = "rules",
 ) -> TicketTriageResult | None:
-
     """
-    Classify a support request.
+    Perform hybrid ticket classification and priority assessment.
 
-    Classification combines:
+    Responsibilities:
+        1. Validate support intents.
+        2. Classify the primary issue.
+        3. Identify additional issue categories.
+        4. Assess customer sentiment.
+        5. Calculate priority and severity.
+        6. Determine SLA and escalation requirements.
+        7. Flag tickets requiring human review.
 
-      1. Intent classification output.
-      2. Deterministic support taxonomy.
-      3. Keyword-based labels.
-      4. Confidence estimation.
-      5. Priority and severity scoring.
-
-    If the upstream intent classifier used Cohere,
-    the classification method is reported as hybrid.
-
-    No business action is executed here.
+    This engine does not create tickets, assign agents,
+    or execute escalation actions.
     """
 
-    # -------------------------------------------------
-    # 1. IDENTIFY SUPPORT INTENTS
-    # -------------------------------------------------
+    # -----------------------------------------------------
+    # 1. VALIDATE SUPPORT INTENTS
+    # -----------------------------------------------------
 
     names = set(intents or [])
 
@@ -422,286 +364,137 @@ def triage_ticket(
     )
 
     if not support_names:
-
         return None
 
-    text = _normalize(message)
+    # -----------------------------------------------------
+    # 2. NORMALIZE INPUT
+    # -----------------------------------------------------
 
+    text = _normalize(message or "")
 
-    # -------------------------------------------------
-    # 2. PRIMARY ISSUE
-    # -------------------------------------------------
+    if primary_intent not in CATEGORY_BY_INTENT:
 
-    primary_category = CATEGORY_BY_INTENT.get(
-        primary_intent
-    )
-
-    if primary_category is None:
-
-        primary_intent = sorted(support_names)[0]
-
-        primary_category = CATEGORY_BY_INTENT[
-            primary_intent
-        ]
-
-
-    # -------------------------------------------------
-    # 3. CONFIDENCE
-    # -------------------------------------------------
+        primary_intent = sorted(
+            support_names
+        )[0]
 
     try:
-
         confidence = max(
             0.0,
-            min(1.0, float(intent_confidence))
+            min(1.0, float(intent_confidence)),
         )
 
     except (TypeError, ValueError):
-
         confidence = 0.0
 
-
-    # -------------------------------------------------
-    # 4. PRIMARY CLASSIFICATION
-    # -------------------------------------------------
+    # -----------------------------------------------------
+    # 3. PRIMARY ISSUE CLASSIFICATION
+    # -----------------------------------------------------
 
     primary_issue = _classify_issue(
-
         primary_intent,
-
         confidence,
-
-        text
-
+        text,
     )
 
-
-    # -------------------------------------------------
-    # 5. MULTI-ISSUE CLASSIFICATION
-    # -------------------------------------------------
+    # -----------------------------------------------------
+    # 4. ADDITIONAL ISSUE CLASSIFICATION
+    # -----------------------------------------------------
 
     additional_issues = []
 
     for intent in sorted(support_names):
 
         if intent == primary_intent:
-
             continue
 
         issue = _classify_issue(
-
             intent,
-
             confidence,
-
-            text
-
+            text,
         )
 
-        # Avoid duplicate categories.
-
         if issue.category != primary_issue.category:
-
             additional_issues.append(issue)
 
     issues = [
         primary_issue,
-        *additional_issues
+        *additional_issues,
     ][:10]
 
+    # -----------------------------------------------------
+    # 5. PRIORITY AND SEVERITY ASSESSMENT
+    # -----------------------------------------------------
 
-    # -------------------------------------------------
-    # 6. PRIORITY SCORING
-    # -------------------------------------------------
-
-    critical = _matching_terms(
-        text,
-        _CRITICAL_TERMS
+    assessment = assess_ticket_priority(
+        message=text,
+        category=primary_issue.category,
     )
 
-    high = _matching_terms(
-        text,
-        _HIGH_TERMS
-    )
-
-    negative = _matching_terms(
-        text,
-        _NEGATIVE_TERMS
-    )
-
-    score = 30
-
-    signals = []
-
-    # Critical signals.
-
-    if critical:
-
-        score += 55
-
-        signals.extend(
-            f"critical:{term}"
-            for term in critical
-        )
-
-    # High urgency signals.
-
-    if high:
-
-        score += min(
-            30,
-            15 + 5 * (len(high) - 1)
-        )
-
-        signals.extend(
-            f"urgent:{term}"
-            for term in high
-        )
-
-    # Negative sentiment signals.
-
-    if negative:
-
-        score += min(
-            14,
-            8 + 2 * (len(negative) - 1)
-        )
-
-        signals.append(
-            "negative_customer_sentiment"
-        )
-
-    # Sensitive support categories.
-
-    if primary_intent in {
-        "COMPLAINT",
-        "PAYMENT_ISSUE"
-    }:
-
-        score += 12
-
-        signals.append(
-            "sensitive_support_category"
-        )
-
-    score = min(
-        100,
-        score
-    )
-
-
-    # -------------------------------------------------
-    # 7. PRIORITY AND SEVERITY
-    # -------------------------------------------------
-
-    if score >= 80:
-
-        priority = "P1_CRITICAL"
-
-        severity = "CRITICAL"
-
-    elif score >= 60:
-
-        priority = "P2_HIGH"
-
-        severity = "HIGH"
-
-    elif score >= 30:
-
-        priority = "P3_NORMAL"
-
-        severity = "MEDIUM"
-
-    else:
-
-        priority = "P4_LOW"
-
-        severity = "LOW"
-
-
-    # -------------------------------------------------
-    # 8. HUMAN REVIEW
-    # -------------------------------------------------
+    # -----------------------------------------------------
+    # 6. HUMAN REVIEW REQUIREMENT
+    # -----------------------------------------------------
 
     requires_human_review = (
-
         primary_issue.confidence < 0.60
-
         or primary_intent in {
             "UNKNOWN",
-            "AMBIGUOUS"
+            "AMBIGUOUS",
         }
-
     )
 
+    # -----------------------------------------------------
+    # 7. CLASSIFICATION METHOD
+    # -----------------------------------------------------
 
-    # -------------------------------------------------
-    # 9. CLASSIFICATION METHOD
-    # -------------------------------------------------
+    method = (intent_method or "rules").casefold()
 
     classification_method = (
-
         "hybrid"
-
-        if intent_method.casefold() == "cohere"
-
+        if method == "cohere"
         else "rules"
-
     )
 
+    # -----------------------------------------------------
+    # 8. PRIORITY REASON GENERATION
+    # -----------------------------------------------------
 
-    # -------------------------------------------------
-    # 10. REASON GENERATION
-    # -------------------------------------------------
-
-    reason_parts = [
-
-        f"Support intent classified as {primary_intent}.",
-
-        f"Category: {primary_category}.",
-
-        f"Subcategory: {primary_issue.subcategory}.",
-
-    ]
-
-    if signals:
-
-        reason_parts.append(
-            "Signals: " + ", ".join(signals) + "."
-        )
-
-    else:
-
-        reason_parts.append(
-            "No explicit urgency signals detected."
-        )
-
-    reason_parts.append(
-        f"Priority score: {score}/100."
+    reason = (
+        f"Support intent classified as {primary_intent}. "
+        f"Category: {primary_issue.category}. "
+        f"Subcategory: {primary_issue.subcategory}. "
+        f"Impact: {assessment.impact_level}/5. "
+        f"Urgency: {assessment.urgency_level}/5. "
+        f"Priority score: {assessment.priority_score}/100. "
+        f"Priority: {assessment.priority}."
     )
 
-
-    # -------------------------------------------------
-    # 11. FINAL RESULT
-    # -------------------------------------------------
+    # -----------------------------------------------------
+    # 9. FINAL TRIAGE RESULT
+    # -----------------------------------------------------
 
     return TicketTriageResult(
-
         category=primary_issue.category,
 
         subcategory=primary_issue.subcategory,
 
-        priority=priority,
+        priority=assessment.priority,
 
-        priority_score=score,
+        priority_score=assessment.priority_score,
 
-        severity=severity,
+        severity=assessment.severity,
+
+        impact_level=assessment.impact_level,
+
+        urgency_level=assessment.urgency_level,
 
         sentiment=_sentiment(text),
 
-        urgency_signals=signals,
+        urgency_signals=assessment.reason_codes,
 
-        reason=" ".join(reason_parts)[:500],
+        priority_reason_codes=assessment.reason_codes,
+
+        reason=reason[:500],
 
         classification_method=classification_method,
 
@@ -709,13 +502,24 @@ def triage_ticket(
 
         labels=_extract_labels(
             text,
-            primary_issue.category
+            primary_issue.category,
         ),
 
         issues=issues,
 
         requires_human_review=requires_human_review,
 
-        suggested_sla_hours=_SLA_HOURS[priority],
+        escalation_required=assessment.escalation_required,
 
+        first_response_sla_hours=(
+            assessment.first_response_sla_hours
+        ),
+
+        resolution_sla_hours=(
+            assessment.resolution_sla_hours
+        ),
+
+        suggested_sla_hours=(
+            assessment.suggested_sla_hours
+        ),
     )
