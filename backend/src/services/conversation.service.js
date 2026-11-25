@@ -1,6 +1,13 @@
 import { pool } from '../config/database.js';
 
-// Retrieve a conversation with organization and chatbot ownership checks.
+const UUID_REGEX =
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+
+// =====================================================
+// GET CONVERSATION
+// =====================================================
+
 export const getConversation = async ({
     conversationId,
     organizationId,
@@ -31,7 +38,10 @@ export const getConversation = async ({
 };
 
 
-// Create a new conversation.
+// =====================================================
+// CREATE CONVERSATION
+// =====================================================
+
 export const createConversation = async ({
     organizationId,
     chatbotId,
@@ -68,7 +78,10 @@ export const createConversation = async ({
 };
 
 
-// Save a message after validating conversation and sender relationships.
+// =====================================================
+// SAVE SINGLE MESSAGE
+// =====================================================
+
 export const saveMessage = async ({
     conversationId,
     organizationId,
@@ -98,7 +111,6 @@ export const saveMessage = async ({
     try {
         await client.query('BEGIN');
 
-        // Verify conversation ownership and availability.
         const conversation = await client.query(
             `
                 SELECT id, assigned_agent_id
@@ -113,10 +125,11 @@ export const saveMessage = async ({
         );
 
         if (conversation.rowCount === 0) {
-            throw new Error('Conversation not found or unavailable.');
+            throw new Error(
+                'Conversation not found or unavailable.'
+            );
         }
 
-        // Verify that the session belongs to this conversation.
         if (sessionId) {
             const session = await client.query(
                 `
@@ -140,11 +153,11 @@ export const saveMessage = async ({
             }
         }
 
-        // Verify that an agent belongs to the organization
-        // and is assigned to this conversation.
         if (senderType === 'agent') {
             if (!senderMemberId) {
-                throw new Error('Agent sender identity is required.');
+                throw new Error(
+                    'Agent sender identity is required.'
+                );
             }
 
             const agent = await client.query(
@@ -177,7 +190,6 @@ export const saveMessage = async ({
             );
         }
 
-        // Insert the message.
         const result = await client.query(
             `
                 INSERT INTO public.messages (
@@ -206,7 +218,6 @@ export const saveMessage = async ({
             ]
         );
 
-        // Update the conversation's latest message timestamp.
         await client.query(
             `
                 UPDATE public.conversations
@@ -232,7 +243,235 @@ export const saveMessage = async ({
 };
 
 
-// Retrieve trusted conversation history.
+// =====================================================
+// SAVE CONVERSATION TURN ATOMICALLY
+// =====================================================
+
+export const saveConversationTurn = async ({
+    conversationId,
+    organizationId,
+    chatbotId,
+    idempotencyKey,
+    customerMessage,
+    botResponse = null
+}) => {
+    if (!UUID_REGEX.test(idempotencyKey ?? '')) {
+        throw new Error('A valid idempotency key is required.');
+    }
+
+    if (
+        typeof customerMessage !== 'string' ||
+        !customerMessage.trim()
+    ) {
+        throw new Error('Customer message cannot be empty.');
+    }
+
+    if (
+        botResponse !== null &&
+        (
+            typeof botResponse !== 'string' ||
+            !botResponse.trim()
+        )
+    ) {
+        throw new Error('Invalid bot response.');
+    }
+
+    const client = await pool.connect();
+
+    try {
+        await client.query('BEGIN');
+
+        // Verify conversation ownership and lock the row.
+        const conversation = await client.query(
+            `
+                SELECT id
+                FROM public.conversations
+                WHERE id = $1
+                  AND organization_id = $2
+                  AND chatbot_id = $3
+                  AND status IN ('active', 'pending')
+                FOR UPDATE;
+            `,
+            [
+                conversationId,
+                organizationId,
+                chatbotId
+            ]
+        );
+
+        if (conversation.rowCount === 0) {
+            throw new Error(
+                'Conversation not found or unavailable.'
+            );
+        }
+
+        // Insert customer message.
+        const customerInsert = await client.query(
+            `
+                INSERT INTO public.messages (
+                    conversation_id,
+                    idempotency_key,
+                    sender_type,
+                    content
+                )
+                VALUES ($1, $2, 'customer', $3)
+                ON CONFLICT (
+                    conversation_id,
+                    idempotency_key,
+                    sender_type
+                )
+                WHERE idempotency_key IS NOT NULL
+                DO NOTHING
+                RETURNING
+                    id,
+                    conversation_id,
+                    idempotency_key,
+                    sender_type,
+                    content,
+                    created_at;
+            `,
+            [
+                conversationId,
+                idempotencyKey,
+                customerMessage.trim()
+            ]
+        );
+
+        let customerRecord = customerInsert.rows[0];
+
+        // Retrieve the existing message if this request
+        // has already been persisted.
+        if (!customerRecord) {
+            const existingCustomer = await client.query(
+                `
+                    SELECT
+                        id,
+                        conversation_id,
+                        idempotency_key,
+                        sender_type,
+                        content,
+                        created_at
+                    FROM public.messages
+                    WHERE conversation_id = $1
+                      AND idempotency_key = $2
+                      AND sender_type = 'customer'
+                    LIMIT 1;
+                `,
+                [conversationId, idempotencyKey]
+            );
+
+            if (existingCustomer.rowCount === 0) {
+                throw new Error(
+                    'Unable to retrieve persisted customer message.'
+                );
+            }
+
+            customerRecord = existingCustomer.rows[0];
+        }
+
+        let botRecord = null;
+
+        // Insert bot response when available.
+        if (botResponse !== null) {
+            const botInsert = await client.query(
+                `
+                    INSERT INTO public.messages (
+                        conversation_id,
+                        idempotency_key,
+                        sender_type,
+                        content
+                    )
+                    VALUES ($1, $2, 'bot', $3)
+                    ON CONFLICT (
+                        conversation_id,
+                        idempotency_key,
+                        sender_type
+                    )
+                    WHERE idempotency_key IS NOT NULL
+                    DO NOTHING
+                    RETURNING
+                        id,
+                        conversation_id,
+                        idempotency_key,
+                        sender_type,
+                        content,
+                        created_at;
+                `,
+                [
+                    conversationId,
+                    idempotencyKey,
+                    botResponse.trim()
+                ]
+            );
+
+            botRecord = botInsert.rows[0] ?? null;
+
+            if (!botRecord) {
+                const existingBot = await client.query(
+                    `
+                        SELECT
+                            id,
+                            conversation_id,
+                            idempotency_key,
+                            sender_type,
+                            content,
+                            created_at
+                        FROM public.messages
+                        WHERE conversation_id = $1
+                          AND idempotency_key = $2
+                          AND sender_type = 'bot'
+                        LIMIT 1;
+                    `,
+                    [conversationId, idempotencyKey]
+                );
+
+                if (existingBot.rowCount === 0) {
+                    throw new Error(
+                        'Unable to retrieve persisted bot response.'
+                    );
+                }
+
+                botRecord = existingBot.rows[0];
+            }
+        }
+
+        // Update conversation activity.
+        await client.query(
+            `
+                UPDATE public.conversations
+                SET last_message_at = NOW()
+                WHERE id = $1
+                  AND organization_id = $2
+                  AND chatbot_id = $3;
+            `,
+            [
+                conversationId,
+                organizationId,
+                chatbotId
+            ]
+        );
+
+        await client.query('COMMIT');
+
+        return {
+            customerMessage: customerRecord,
+            botMessage: botRecord
+        };
+
+    } catch (error) {
+        await client.query('ROLLBACK');
+        throw error;
+
+    } finally {
+        client.release();
+    }
+};
+
+
+// =====================================================
+// GET TRUSTED CONVERSATION HISTORY
+// =====================================================
+
 export const getConversationHistory = async ({
     conversationId,
     organizationId,

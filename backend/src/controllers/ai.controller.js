@@ -7,6 +7,13 @@ import {
 } from '../services/ai.service.js';
 
 import {
+    getConversation,
+    createConversation,
+    getConversationHistory,
+    saveConversationTurn
+} from '../services/conversation.service.js';
+
+import {
     logAIUsage
 } from '../services/usage-logging.service.js';
 
@@ -24,11 +31,20 @@ const UUID_REGEX =
     /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 
+const DEFAULT_DOMAIN = 'general';
+
+
+// =====================================================
+// CHAT CONTROLLER
+// =====================================================
+
 export const chatController = async (req, res, next) => {
 
     try {
 
-        // 1. Validate idempotency key
+        // -------------------------------------------------
+        // 1. VALIDATE IDEMPOTENCY KEY
+        // -------------------------------------------------
 
         const requestId = req.get('Idempotency-Key');
 
@@ -38,28 +54,33 @@ export const chatController = async (req, res, next) => {
         ) {
             return res.status(400).json({
                 success: false,
-                message: 'A valid Idempotency-Key UUID is required'
+                message: 'A valid Idempotency-Key UUID is required.'
             });
         }
 
 
-        const { message, chatbot_id } = req.body;
+        // -------------------------------------------------
+        // 2. VALIDATE REQUEST BODY
+        // -------------------------------------------------
 
+        const {
+            message,
+            chatbot_id,
+            conversation_id = null
+        } = req.body ?? {};
 
-        // 2. Validate customer message
 
         if (
             typeof message !== 'string' ||
-            !message.trim()
+            !message.trim() ||
+            message.length > 10000
         ) {
             return res.status(400).json({
                 success: false,
-                message: 'A valid message is required'
+                message: 'A valid message is required.'
             });
         }
 
-
-        // 3. Validate chatbot ID
 
         if (
             typeof chatbot_id !== 'string' ||
@@ -67,12 +88,31 @@ export const chatController = async (req, res, next) => {
         ) {
             return res.status(400).json({
                 success: false,
-                message: 'A valid chatbot ID is required'
+                message: 'A valid chatbot ID is required.'
             });
         }
 
 
-        // 4. Verify chatbot ownership
+        if (
+            conversation_id !== null &&
+            (
+                typeof conversation_id !== 'string' ||
+                !UUID_REGEX.test(conversation_id)
+            )
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: 'A valid conversation ID is required.'
+            });
+        }
+
+
+        const normalizedMessage = message.trim();
+
+
+        // -------------------------------------------------
+        // 3. VERIFY CHATBOT OWNERSHIP
+        // -------------------------------------------------
 
         const chatbotResult = await pool.query(
             `
@@ -81,7 +121,7 @@ export const chatController = async (req, res, next) => {
                     organization_id
                 FROM public.chatbots
                 WHERE id = $1
-                AND organization_id = $2
+                  AND organization_id = $2
                 LIMIT 1;
             `,
             [
@@ -94,27 +134,30 @@ export const chatController = async (req, res, next) => {
         if (chatbotResult.rowCount === 0) {
             return res.status(404).json({
                 success: false,
-                message: 'Chatbot not found'
+                message: 'Chatbot not found.'
             });
         }
 
 
         const chatbot = chatbotResult.rows[0];
 
-        const normalizedMessage = message.trim();
 
-
-        // 5. Generate deterministic request hash
+        // -------------------------------------------------
+        // 4. GENERATE REQUEST HASH
+        // -------------------------------------------------
 
         const requestHash = createHash('sha256')
             .update(JSON.stringify({
                 message: normalizedMessage,
-                chatbotId: chatbot.id
+                chatbotId: chatbot.id,
+                conversationId: conversation_id
             }))
             .digest('hex');
 
 
-        // 6. Reserve or retrieve idempotency request
+        // -------------------------------------------------
+        // 5. RESERVE IDEMPOTENCY REQUEST
+        // -------------------------------------------------
 
         const reservation = await reserveRequest({
 
@@ -129,7 +172,9 @@ export const chatController = async (req, res, next) => {
         });
 
 
-        // 7. Handle existing requests
+        // -------------------------------------------------
+        // 6. HANDLE EXISTING REQUESTS
+        // -------------------------------------------------
 
         if (reservation.state === 'completed') {
 
@@ -173,14 +218,147 @@ export const chatController = async (req, res, next) => {
         }
 
 
-        // 8. Generate AI response
+        // -------------------------------------------------
+        // 7. GET OR CREATE CONVERSATION
+        // -------------------------------------------------
 
-        const result = await generateAIResponse(
-            normalizedMessage
+        let conversation;
+
+
+        if (conversation_id) {
+
+            conversation = await getConversation({
+
+                conversationId: conversation_id,
+
+                organizationId: chatbot.organization_id,
+
+                chatbotId: chatbot.id
+
+            });
+
+
+            if (!conversation) {
+
+                return res.status(404).json({
+                    success: false,
+                    message:
+                        'Conversation not found or does not belong to this chatbot.'
+                });
+
+            }
+
+        } else {
+
+            conversation = await createConversation({
+
+                organizationId: chatbot.organization_id,
+
+                chatbotId: chatbot.id
+
+            });
+
+        }
+
+
+        // -------------------------------------------------
+        // 8. LOAD TRUSTED CONVERSATION HISTORY
+        // -------------------------------------------------
+
+        const history = await getConversationHistory({
+
+            conversationId: conversation.id,
+
+            organizationId: chatbot.organization_id,
+
+            chatbotId: chatbot.id,
+
+            limit: 100
+
+        });
+
+
+        // -------------------------------------------------
+        // 9. LOAD CHATBOT SETTINGS
+        // -------------------------------------------------
+
+        const settingsResult = await pool.query(
+            `
+                SELECT
+                    settings,
+                    system_prompt
+                FROM public.chatbot_settings
+                WHERE chatbot_id = $1
+                LIMIT 1;
+            `,
+            [chatbot.id]
         );
 
 
-        // 9. Log Cohere usage
+        const chatbotSettings =
+            settingsResult.rows[0] ?? {};
+
+
+        const settings =
+            chatbotSettings.settings ?? {};
+
+
+        const domain =
+            settings.domain ?? DEFAULT_DOMAIN;
+
+
+        const requiredEntities =
+            settings.required_entities ?? [];
+
+
+        // -------------------------------------------------
+        // 10. GENERATE AI RESPONSE
+        // -------------------------------------------------
+
+        const result = await generateAIResponse({
+
+            message: normalizedMessage,
+
+            history,
+
+            domain,
+
+            requiredEntities
+
+        });
+
+
+        // -------------------------------------------------
+        // 11. PERSIST CUSTOMER + BOT MESSAGES ATOMICALLY
+        // -------------------------------------------------
+
+        const botResponse =
+            typeof result.response === 'string' &&
+            result.response.trim()
+                ? result.response.trim()
+                : null;
+
+
+        await saveConversationTurn({
+
+            conversationId: conversation.id,
+
+            organizationId: chatbot.organization_id,
+
+            chatbotId: chatbot.id,
+
+            idempotencyKey: requestId,
+
+            customerMessage: normalizedMessage,
+
+            botResponse
+
+        });
+
+
+        // -------------------------------------------------
+        // 12. LOG COHERE USAGE
+        // -------------------------------------------------
 
         if (
             result.status === 'response_generated' &&
@@ -191,6 +369,7 @@ export const chatController = async (req, res, next) => {
             try {
 
                 const usage = result.usage;
+
 
                 const pricing = calculateCohereCost({
 
@@ -255,7 +434,22 @@ export const chatController = async (req, res, next) => {
         }
 
 
-        // 10. Cache the original AI response
+        // -------------------------------------------------
+        // 13. BUILD RESPONSE
+        // -------------------------------------------------
+
+        const responseBody = {
+
+            ...result,
+
+            conversation_id: conversation.id
+
+        };
+
+
+        // -------------------------------------------------
+        // 14. CACHE IDEMPOTENT RESPONSE
+        // -------------------------------------------------
 
         await completeRequest({
 
@@ -263,16 +457,18 @@ export const chatController = async (req, res, next) => {
 
             reservationToken: reservation.reservationToken,
 
-            responseBody: result,
+            responseBody,
 
             responseStatus: 200
 
         });
 
 
-        // 11. Return AI response
+        // -------------------------------------------------
+        // 15. RETURN RESPONSE
+        // -------------------------------------------------
 
-        return res.status(200).json(result);
+        return res.status(200).json(responseBody);
 
 
     } catch (error) {
