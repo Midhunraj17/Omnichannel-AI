@@ -1,0 +1,9 @@
+Add these attributes INSIDE the existing Settings class in app/core/config.py.
+Do not replace the existing configuration file.
+
+    COHERE_TIMEOUT_SECONDS = float(os.getenv("COHERE_TIMEOUT_SECONDS", 30))
+    COHERE_MAX_RETRIES = int(os.getenv("COHERE_MAX_RETRIES", 2))
+    COHERE_RETRY_BASE_SECONDS = float(os.getenv("COHERE_RETRY_BASE_SECONDS", 0.5))
+    COHERE_RETRY_MAX_SECONDS = float(os.getenv("COHERE_RETRY_MAX_SECONDS", 4))
+    COHERE_MAX_TOKENS = int(os.getenv("COHERE_MAX_TOKENS", 800))
+    COHERE_TEMPERATURE = float(os.getenv("COHERE_TEMPERATURE", 0.3))
