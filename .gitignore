@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 node_modules/
 .venv/
 venv/
@@ -12,3 +13,30 @@ coverage/
 .pytest_cache/
 .mypy_cache/
 .DS_Store
+=======
+
+venv/
+.venv/
+**/venv/
+**/.venv/
+
+__pycache__/
+*.pyc
+.pytest_cache/
+
+node_modules/
+**/node_modules/
+
+.env
+.env.*
+!.env.example
+
+*.db
+*.sqlite
+*.sqlite3
+
+backend/uploads/*
+backend/ai_models/bert_intent_model/
+
+*.log
+>>>>>>> 94298abe76623a8641134ab5ebd375bdf24abe52
