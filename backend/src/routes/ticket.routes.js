@@ -9,6 +9,10 @@ import {
 } from '../controllers/ticket-intake.controller.js';
 
 import {
+    ticketEscalationController
+} from '../controllers/ticket-escalation.controller.js';
+
+import {
     authenticateUser
 } from '../middleware/auth.middleware.js';
 
@@ -30,7 +34,10 @@ export const createTicketRouter = ({
 
     ticketRoutingControllerFn = ticketRoutingController,
 
-    ticketIntakeControllerFn = ticketIntakeController
+    ticketIntakeControllerFn = ticketIntakeController,
+
+    ticketEscalationControllerFn =
+        ticketEscalationController
 
 } = {}) => {
 
@@ -78,6 +85,28 @@ export const createTicketRouter = ({
         ),
 
         ticketRoutingControllerFn
+
+    );
+
+
+    // -------------------------------------------------
+    // EVALUATE AND APPLY TICKET ESCALATION
+    // -------------------------------------------------
+
+    router.post(
+
+        '/:ticketId/escalation/evaluate',
+
+        authenticateUserMiddleware,
+
+        requireOrganizationMiddleware,
+
+        requireRoles(
+            'owner',
+            'admin'
+        ),
+
+        ticketEscalationControllerFn
 
     );
 
