@@ -1,8 +1,6 @@
-"""Controlled orchestration across the existing AI engines."""
+"""Controlled orchestration with hybrid AI decision-making."""
 
 import logging
-
-from app.schemas.context import ContextMessage
 
 from app.schemas.entities import (
     EntityExtractionContext,
@@ -51,17 +49,27 @@ from app.services.ticket_triage import (
     triage_ticket,
 )
 
+from app.services.hybrid_decision_engine import (
+    decide_hybrid_action,
+)
+
 
 logger = logging.getLogger(__name__)
 
 
+# =========================================================
+# CLARIFICATION MESSAGE
+# =========================================================
+
 def _clarification_message(
-    missing_entities: list[str]
+    missing_entities: list[str],
 ) -> str:
 
     if not missing_entities:
 
-        return "Could you clarify what you need help with?"
+        return (
+            "Could you clarify what you need help with?"
+        )
 
     readable = ", ".join(
         item.replace("_", " ").lower()
@@ -74,15 +82,19 @@ def _clarification_message(
     )
 
 
+# =========================================================
+# MAIN ORCHESTRATOR
+# =========================================================
+
 def orchestrate(
-    request: OrchestrationRequest
+    request: OrchestrationRequest,
 ) -> OrchestrationResponse:
 
-    """Run context → intent → entities → routing → classification → response."""
+    """Execute the complete hybrid AI decision pipeline."""
 
-    # -------------------------------------------------
+    # -----------------------------------------------------
     # 1. CONVERSATION CONTEXT
-    # -------------------------------------------------
+    # -----------------------------------------------------
 
     context = build_conversation_context(
 
@@ -100,10 +112,9 @@ def orchestrate(
         for item in context.messages[-10:]
     ]
 
-
-    # -------------------------------------------------
+    # -----------------------------------------------------
     # 2. INTENT CLASSIFICATION
-    # -------------------------------------------------
+    # -----------------------------------------------------
 
     intent_request = IntentClassificationRequest(
 
@@ -113,7 +124,9 @@ def orchestrate(
 
             previous_intent=None,
 
-            conversation_summary=request.conversation_summary,
+            conversation_summary=(
+                request.conversation_summary
+            ),
 
             recent_messages=recent_messages,
 
@@ -125,14 +138,13 @@ def orchestrate(
 
         "success": True,
 
-        **classify_intent(intent_request)
+        **classify_intent(intent_request),
 
     })
 
-
-    # -------------------------------------------------
+    # -----------------------------------------------------
     # 3. ENTITY EXTRACTION
-    # -------------------------------------------------
+    # -----------------------------------------------------
 
     entity_request = EntityExtractionRequest(
 
@@ -144,7 +156,9 @@ def orchestrate(
 
         context=EntityExtractionContext(
 
-            conversation_summary=request.conversation_summary,
+            conversation_summary=(
+                request.conversation_summary
+            ),
 
             recent_messages=recent_messages,
 
@@ -156,47 +170,27 @@ def orchestrate(
 
         "success": True,
 
-        **extract_entities(entity_request)
+        **extract_entities(entity_request),
 
     })
 
-
-    # -------------------------------------------------
-    # 4. ROUTING
-    # -------------------------------------------------
+    # -----------------------------------------------------
+    # 4. INITIAL ROUTING
+    # -----------------------------------------------------
 
     routing_result = decide_route(
         intent_result
     )
 
-    if (
-        entity_result.requires_clarification
-        and not routing_result.handoff_requested
-    ):
-
-        routing_result = RoutingResponse.model_validate({
-
-            **routing_result.model_dump(),
-
-            "destination": "CLARIFICATION_REQUIRED",
-
-            "requires_clarification": True,
-
-            "reason": (
-                "Required information is missing "
-                "from the customer message."
-            ),
-
-        })
-
-
-    # -------------------------------------------------
-    # 5. ADVANCED TICKET CLASSIFICATION
-    # -------------------------------------------------
+    # -----------------------------------------------------
+    # 5. TICKET TRIAGE
+    # -----------------------------------------------------
 
     triage_result = triage_ticket(
 
-        primary_intent=intent_result.primary_intent,
+        primary_intent=(
+            intent_result.primary_intent
+        ),
 
         intents=[
             item.name
@@ -205,18 +199,66 @@ def orchestrate(
 
         message=request.message,
 
-        intent_confidence=intent_result.confidence,
+        intent_confidence=(
+            intent_result.confidence
+        ),
 
-        intent_method=intent_result.classification_method,
+        intent_method=(
+            intent_result.classification_method
+        ),
 
     )
 
+    # -----------------------------------------------------
+    # 6. HYBRID DECISION ENGINE
+    # -----------------------------------------------------
 
-    # -------------------------------------------------
-    # 6. COMMON RESPONSE METADATA
-    # -------------------------------------------------
+    decision = decide_hybrid_action(
 
-    destination = routing_result.destination
+        intent=intent_result,
+
+        entities=entity_result,
+
+        routing=routing_result,
+
+        ticket_triage=triage_result,
+
+    )
+
+    # -----------------------------------------------------
+    # 7. APPLY FINAL DECISION
+    # -----------------------------------------------------
+
+    destination = decision.destination
+
+    # Preserve the explicit routing response while
+    # synchronizing its destination with the final decision.
+
+    if routing_result.destination != destination:
+
+        routing_result = RoutingResponse.model_validate({
+
+            **routing_result.model_dump(),
+
+            "destination": destination,
+
+            "requires_clarification": (
+                decision.requires_clarification
+            ),
+
+            "handoff_requested": (
+                decision.action == "HANDOFF"
+            ),
+
+            "confidence": decision.confidence,
+
+            "reason": decision.reason[:300],
+
+        })
+
+    # -----------------------------------------------------
+    # 8. COMMON RESPONSE METADATA
+    # -----------------------------------------------------
 
     common = {
 
@@ -230,26 +272,31 @@ def orchestrate(
 
         "ticket_triage": triage_result,
 
-        "context_history_messages_included":
-            context.history_messages_included,
+        "hybrid_decision": decision,
 
-        "context_total_messages":
-            context.total_messages,
+        "context_history_messages_included": (
+            context.history_messages_included
+        ),
 
-        "context_total_characters":
-            context.total_characters,
+        "context_total_messages": (
+            context.total_messages
+        ),
 
-        "context_truncated":
-            context.truncated,
+        "context_total_characters": (
+            context.total_characters
+        ),
+
+        "context_truncated": (
+            context.truncated
+        ),
 
     }
 
+    # -----------------------------------------------------
+    # 9. HUMAN HANDOFF
+    # -----------------------------------------------------
 
-    # -------------------------------------------------
-    # 7. HUMAN HANDOFF
-    # -------------------------------------------------
-
-    if destination == "HUMAN_AGENT":
+    if decision.action == "HANDOFF":
 
         return OrchestrationResponse(
 
@@ -261,14 +308,13 @@ def orchestrate(
 
         )
 
+    # -----------------------------------------------------
+    # 10. SUPPORT / PRODUCT ROUTING
+    # -----------------------------------------------------
 
-    # -------------------------------------------------
-    # 8. SUPPORT / PRODUCT AGENT
-    # -------------------------------------------------
-
-    if destination in {
-        "PRODUCT_AGENT",
-        "SUPPORT_AGENT"
+    if decision.action in {
+        "ROUTE_SUPPORT",
+        "ROUTE_PRODUCT",
     }:
 
         return OrchestrationResponse(
@@ -281,12 +327,11 @@ def orchestrate(
 
         )
 
+    # -----------------------------------------------------
+    # 11. CLARIFICATION
+    # -----------------------------------------------------
 
-    # -------------------------------------------------
-    # 9. CLARIFICATION
-    # -------------------------------------------------
-
-    if destination == "CLARIFICATION_REQUIRED":
+    if decision.action == "CLARIFY":
 
         return OrchestrationResponse(
 
@@ -300,17 +345,17 @@ def orchestrate(
 
         )
 
-
-    # -------------------------------------------------
-    # 10. RESPONSE GENERATION
-    # -------------------------------------------------
+    # -----------------------------------------------------
+    # 12. RESPONSE GENERATION
+    # -----------------------------------------------------
 
     history_for_response = [
 
         {
+
             "role": item.role,
 
-            "content": item.content
+            "content": item.content,
 
         }
 
@@ -318,7 +363,7 @@ def orchestrate(
 
         if item.role in {
             "user",
-            "assistant"
+            "assistant",
         }
 
     ]
@@ -331,7 +376,9 @@ def orchestrate(
 
         domain=request.domain,
 
-        conversation_summary=request.conversation_summary,
+        conversation_summary=(
+            request.conversation_summary
+        ),
 
     )
 
@@ -345,7 +392,7 @@ def orchestrate(
 
         logger.exception(
             "Response generation failed: %s",
-            type(error).__name__
+            type(error).__name__,
         )
 
         return OrchestrationResponse(
@@ -370,10 +417,9 @@ def orchestrate(
 
         )
 
-
-    # -------------------------------------------------
-    # 11. FINAL RESPONSE
-    # -------------------------------------------------
+    # -----------------------------------------------------
+    # 13. FINAL RESPONSE
+    # -----------------------------------------------------
 
     return OrchestrationResponse(
 
