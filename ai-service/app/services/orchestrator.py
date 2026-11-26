@@ -1,4 +1,4 @@
-"""Controlled orchestration with hybrid AI decision-making."""
+"""Controlled orchestration with hybrid and contextual AI resolution."""
 
 import logging
 
@@ -53,13 +53,13 @@ from app.services.hybrid_decision_engine import (
     decide_hybrid_action,
 )
 
+from app.services.contextual_resolution import (
+    resolve_context,
+)
+
 
 logger = logging.getLogger(__name__)
 
-
-# =========================================================
-# CLARIFICATION MESSAGE
-# =========================================================
 
 def _clarification_message(
     missing_entities: list[str],
@@ -82,15 +82,11 @@ def _clarification_message(
     )
 
 
-# =========================================================
-# MAIN ORCHESTRATOR
-# =========================================================
-
 def orchestrate(
     request: OrchestrationRequest,
 ) -> OrchestrationResponse:
 
-    """Execute the complete hybrid AI decision pipeline."""
+    """Execute the hybrid AI and contextual resolution pipeline."""
 
     # -----------------------------------------------------
     # 1. CONVERSATION CONTEXT
@@ -226,13 +222,28 @@ def orchestrate(
     )
 
     # -----------------------------------------------------
-    # 7. APPLY FINAL DECISION
+    # 7. CONTEXTUAL RESOLUTION ENGINE
+    # -----------------------------------------------------
+
+    contextual_result = resolve_context(
+
+        current_message=request.message,
+
+        history=context.messages[:-1],
+
+        conversation_summary=request.conversation_summary,
+
+        intent_result=intent_result,
+
+        entity_result=entity_result,
+
+    )
+
+    # -----------------------------------------------------
+    # 8. APPLY FINAL DECISION
     # -----------------------------------------------------
 
     destination = decision.destination
-
-    # Preserve the explicit routing response while
-    # synchronizing its destination with the final decision.
 
     if routing_result.destination != destination:
 
@@ -257,7 +268,7 @@ def orchestrate(
         })
 
     # -----------------------------------------------------
-    # 8. COMMON RESPONSE METADATA
+    # 9. COMMON RESPONSE METADATA
     # -----------------------------------------------------
 
     common = {
@@ -273,6 +284,8 @@ def orchestrate(
         "ticket_triage": triage_result,
 
         "hybrid_decision": decision,
+
+        "contextual_resolution": contextual_result,
 
         "context_history_messages_included": (
             context.history_messages_included
@@ -293,7 +306,7 @@ def orchestrate(
     }
 
     # -----------------------------------------------------
-    # 9. HUMAN HANDOFF
+    # 10. HUMAN HANDOFF
     # -----------------------------------------------------
 
     if decision.action == "HANDOFF":
@@ -309,7 +322,7 @@ def orchestrate(
         )
 
     # -----------------------------------------------------
-    # 10. SUPPORT / PRODUCT ROUTING
+    # 11. SUPPORT / PRODUCT ROUTING
     # -----------------------------------------------------
 
     if decision.action in {
@@ -328,7 +341,7 @@ def orchestrate(
         )
 
     # -----------------------------------------------------
-    # 11. CLARIFICATION
+    # 12. CLARIFICATION
     # -----------------------------------------------------
 
     if decision.action == "CLARIFY":
@@ -346,7 +359,7 @@ def orchestrate(
         )
 
     # -----------------------------------------------------
-    # 12. RESPONSE GENERATION
+    # 13. RESPONSE GENERATION
     # -----------------------------------------------------
 
     history_for_response = [
@@ -378,6 +391,10 @@ def orchestrate(
 
         conversation_summary=(
             request.conversation_summary
+        ),
+
+        contextual_context=(
+            contextual_result.contextual_context
         ),
 
     )
@@ -418,7 +435,7 @@ def orchestrate(
         )
 
     # -----------------------------------------------------
-    # 13. FINAL RESPONSE
+    # 14. FINAL RESPONSE
     # -----------------------------------------------------
 
     return OrchestrationResponse(

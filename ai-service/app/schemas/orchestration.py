@@ -24,10 +24,12 @@ from app.schemas.hybrid_decision import (
     HybridDecision,
 )
 
+from app.schemas.contextual_resolution import (
+    ContextualResolutionResult,
+)
+
 
 class OrchestrationHistoryMessage(BaseModel):
-
-    """A prior message supplied by the authenticated backend."""
 
     sender_type: Literal[
         "customer",
@@ -59,8 +61,6 @@ class OrchestrationHistoryMessage(BaseModel):
 
 
 class OrchestrationRequest(BaseModel):
-
-    """Validated input for the AI orchestration pipeline."""
 
     message: str = Field(
         min_length=1,
@@ -139,6 +139,8 @@ class OrchestrationResponse(BaseModel):
     ticket_triage: TicketTriageResult | None = None
 
     hybrid_decision: HybridDecision
+
+    contextual_resolution: ContextualResolutionResult
 
     response: str | None = None
 
