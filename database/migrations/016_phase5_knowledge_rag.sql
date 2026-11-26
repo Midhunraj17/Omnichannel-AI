@@ -1,0 +1,96 @@
+-- Phase 5: knowledge-base lifecycle, vector retrieval, and tenant isolation.
+-- Reuses the Phase 1 tables. Safe to apply once after migrations 001–015.
+
+BEGIN;
+
+ALTER TABLE public.knowledge_documents
+    ADD COLUMN IF NOT EXISTS content_hash TEXT,
+    ADD COLUMN IF NOT EXISTS error_message TEXT,
+    ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS mime_type TEXT;
+
+ALTER TABLE public.knowledge_bases
+    ADD COLUMN IF NOT EXISTS retrieval_config JSONB NOT NULL DEFAULT
+        '{"top_k":8,"score_threshold":0.15}'::jsonb;
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_bases_org_status
+    ON public.knowledge_bases (organization_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_documents_kb_status
+    ON public.knowledge_documents (knowledge_base_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_document_index
+    ON public.knowledge_chunks (document_id, chunk_index);
+
+CREATE INDEX IF NOT EXISTS idx_document_embeddings_model
+    ON public.document_embeddings (embedding_model);
+
+-- IVFFlat is not created here: it requires a populated vector table and
+-- workload-specific lists tuning. A plain vector distance query remains valid.
+
+CREATE OR REPLACE FUNCTION public.search_knowledge_chunks(
+    p_organization_id UUID,
+    p_knowledge_base_id UUID,
+    p_query_embedding VECTOR(1024),
+    p_match_count INTEGER DEFAULT 8,
+    p_score_threshold DOUBLE PRECISION DEFAULT 0.15
+)
+RETURNS TABLE (
+    chunk_id UUID,
+    document_id UUID,
+    file_name TEXT,
+    chunk_index INTEGER,
+    content TEXT,
+    metadata JSONB,
+    similarity DOUBLE PRECISION
+)
+LANGUAGE SQL
+STABLE
+SECURITY INVOKER
+SET search_path = ''
+AS $$
+    SELECT
+        kc.id AS chunk_id,
+        kd.id AS document_id,
+        kd.file_name,
+        kc.chunk_index,
+        kc.content,
+        kc.metadata,
+        (1 - (de.embedding <=> p_query_embedding))::double precision AS similarity
+    FROM public.document_embeddings de
+    JOIN public.knowledge_chunks kc ON kc.id = de.chunk_id
+    JOIN public.knowledge_documents kd ON kd.id = kc.document_id
+    JOIN public.knowledge_bases kb ON kb.id = kd.knowledge_base_id
+    WHERE kb.organization_id = p_organization_id
+      AND kb.id = p_knowledge_base_id
+      AND kb.status = 'active'
+      AND kd.status = 'completed'
+      AND de.embedding_model = current_setting('app.embedding_model', true)
+      AND (1 - (de.embedding <=> p_query_embedding)) >= p_score_threshold
+    ORDER BY de.embedding <=> p_query_embedding
+    LIMIT GREATEST(1, LEAST(COALESCE(p_match_count, 8), 20));
+$$;
+
+REVOKE ALL ON FUNCTION public.search_knowledge_chunks(
+    UUID, UUID, VECTOR, INTEGER, DOUBLE PRECISION
+) FROM PUBLIC;
+
+-- The application uses the backend's privileged database connection after
+-- authenticating and resolving organization membership. Authenticated direct
+-- client access remains governed by existing RLS policies.
+GRANT EXECUTE ON FUNCTION public.search_knowledge_chunks(
+    UUID, UUID, VECTOR, INTEGER, DOUBLE PRECISION
+) TO authenticated, service_role;
+
+COMMIT;
+
+-- Rollback (manual; run only if Phase 5 is being removed):
+-- DROP FUNCTION IF EXISTS public.search_knowledge_chunks(UUID, UUID, VECTOR, INTEGER, DOUBLE PRECISION);
+-- DROP INDEX IF EXISTS public.idx_knowledge_bases_org_status;
+-- DROP INDEX IF EXISTS public.idx_knowledge_documents_kb_status;
+-- DROP INDEX IF EXISTS public.idx_knowledge_chunks_document_index;
+-- DROP INDEX IF EXISTS public.idx_document_embeddings_model;
+-- ALTER TABLE public.knowledge_documents DROP COLUMN IF EXISTS content_hash,
+--   DROP COLUMN IF EXISTS error_message, DROP COLUMN IF EXISTS processed_at,
+--   DROP COLUMN IF EXISTS mime_type;
+-- ALTER TABLE public.knowledge_bases DROP COLUMN IF EXISTS retrieval_config;
