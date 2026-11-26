@@ -13,6 +13,10 @@ import {
 } from '../controllers/ticket-escalation.controller.js';
 
 import {
+    ticketPipelineController
+} from '../controllers/ticket-pipeline.controller.js';
+
+import {
     authenticateUser
 } from '../middleware/auth.middleware.js';
 
@@ -37,11 +41,37 @@ export const createTicketRouter = ({
     ticketIntakeControllerFn = ticketIntakeController,
 
     ticketEscalationControllerFn =
-        ticketEscalationController
+        ticketEscalationController,
+
+    ticketPipelineControllerFn =
+        ticketPipelineController
 
 } = {}) => {
 
     const router = express.Router();
+
+
+    // -------------------------------------------------
+    // END-TO-END CUSTOMER SUPPORT PIPELINE
+    // -------------------------------------------------
+
+    router.post(
+
+        '/pipeline/from-conversation',
+
+        authenticateUserMiddleware,
+
+        requireOrganizationMiddleware,
+
+        requireRoles(
+            'owner',
+            'admin',
+            'support_agent'
+        ),
+
+        ticketPipelineControllerFn
+
+    );
 
 
     // -------------------------------------------------
