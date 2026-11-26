@@ -11,6 +11,7 @@ from app.api.routes import (
     routing,
     orchestrator,
     response_generation,
+    escalation,
 )
 
 
@@ -53,6 +54,8 @@ protected_routes = [
     (routing.router, "Routing"),
     (orchestrator.router, "AI Orchestrator"),
     (response_generation.router, "Response Generation"),
+    (escalation.router, "Ticket Escalation"),
+
 ]
 
 for router, tag in protected_routes:
