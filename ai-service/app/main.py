@@ -2,7 +2,6 @@ from fastapi import FastAPI, Depends
 
 from app.core.config import settings
 from app.core.security import verify_internal_api_key
-
 from app.api.routes import (
     health,
     chat,
@@ -12,12 +11,8 @@ from app.api.routes import (
     orchestrator,
     response_generation,
     escalation,
+    knowledge,
 )
-
-
-# --------------------------------------------------
-# FastAPI Application
-# --------------------------------------------------
 
 IS_PRODUCTION = settings.ENVIRONMENT.lower() == "production"
 
@@ -30,23 +25,11 @@ app = FastAPI(
     openapi_url=None if IS_PRODUCTION else "/openapi.json",
 )
 
+# Public health endpoint.
+app.include_router(health.router, prefix="/api/v1", tags=["Health"])
 
-# --------------------------------------------------
-# Public Routes
-# --------------------------------------------------
-
-# Health checks remain publicly accessible.
-app.include_router(
-    health.router,
-    prefix="/api/v1",
-    tags=["Health"],
-)
-
-
-# --------------------------------------------------
-# Protected Internal AI Routes
-# --------------------------------------------------
-
+# Every internal route, including knowledge ingestion, requires the shared
+# backend-to-AI-service bearer API key.
 protected_routes = [
     (chat.router, "Chat"),
     (intent.router, "Intent Classification"),
@@ -55,21 +38,17 @@ protected_routes = [
     (orchestrator.router, "AI Orchestrator"),
     (response_generation.router, "Response Generation"),
     (escalation.router, "Ticket Escalation"),
-
+    (knowledge.router, "Knowledge Ingestion"),
 ]
 
-for router, tag in protected_routes:
+for route, tag in protected_routes:
     app.include_router(
-        router,
+        route,
         prefix="/api/v1",
         tags=[tag],
         dependencies=[Depends(verify_internal_api_key)],
     )
 
-
-# --------------------------------------------------
-# Root Endpoint
-# --------------------------------------------------
 
 @app.get("/")
 async def root():
