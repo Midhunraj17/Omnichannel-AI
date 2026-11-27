@@ -478,29 +478,22 @@ test(
 // =====================================================
 
 test(
-
     'revokeKnowledgeBaseAccess removes only matching association',
-
     async () => {
 
         const database = createMockDatabase({
 
             queryResult: {
-
                 rows: [{ id: KNOWLEDGE_BASE_ID }],
-
                 rowCount: 1
-
             }
 
         });
-
 
         const service =
             createChatbotKnowledgeBaseService({
                 database
             });
-
 
         const result =
             await service.revokeKnowledgeBaseAccess({
@@ -513,21 +506,39 @@ test(
 
             });
 
-
         assert.equal(
             result.revoked,
             true
         );
 
-
-        assert.match(
-
+        // Verify transaction started.
+        assert.equal(
             database.calls[0].sql,
+            'BEGIN'
+        );
 
-            /DELETE FROM public\.knowledge_base_chatbot_access/
+        // Verify the exact association DELETE was executed.
+        assert.ok(
+
+            database.calls.some(
+
+                call => /DELETE FROM public\.knowledge_base_chatbot_access/i
+                    .test(call.sql)
+
+            )
+
+        );
+
+        // Verify transaction committed.
+        assert.ok(
+
+            database.calls.some(
+
+                call => call.sql === 'COMMIT'
+
+            )
 
         );
 
     }
-
 );
