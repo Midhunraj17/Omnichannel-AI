@@ -14,9 +14,14 @@ from app.schemas.entities import EntityDomain
 
 
 MAX_MESSAGE_LENGTH = 10000
+
 MAX_HISTORY_MESSAGES = 30
+
 MAX_SUMMARY_LENGTH = 3000
+
 MAX_CONTEXTUAL_CONTEXT_LENGTH = 8000
+
+MAX_KNOWLEDGE_CONTEXT_LENGTH = 8000
 
 
 class ResponseGenerationRequest(BaseModel):
@@ -46,6 +51,15 @@ class ResponseGenerationRequest(BaseModel):
     contextual_context: str | None = Field(
         default=None,
         max_length=MAX_CONTEXTUAL_CONTEXT_LENGTH,
+    )
+
+    # PHASE 5.9 — KNOWLEDGE BASE CONTEXT
+
+    knowledge_base_enabled: bool = False
+
+    knowledge_context: str | None = Field(
+        default=None,
+        max_length=MAX_KNOWLEDGE_CONTEXT_LENGTH,
     )
 
     @field_validator("message")
@@ -121,6 +135,20 @@ class ResponseGenerationRequest(BaseModel):
     @field_validator("contextual_context")
     @classmethod
     def normalize_contextual_context(
+        cls,
+        value: str | None,
+    ) -> str | None:
+
+        if value is None:
+            return None
+
+        value = value.strip()
+
+        return value or None
+
+    @field_validator("knowledge_context")
+    @classmethod
+    def normalize_knowledge_context(
         cls,
         value: str | None,
     ) -> str | None:
