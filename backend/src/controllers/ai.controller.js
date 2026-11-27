@@ -3,6 +3,10 @@ import { createHash } from 'node:crypto';
 import { pool } from '../config/database.js';
 
 import {
+    findKnowledgeBaseForChatbot
+} from '../services/chatbot-knowledge-base.service.js';
+
+import {
     generateAIResponse
 } from '../services/ai.service.js';
 
@@ -126,36 +130,13 @@ const findChatbotKnowledgeBase = async ({
     organizationId
 }) => {
 
-    const result = await pool.query(
-        `
-            SELECT
-                id,
-                organization_id,
-                chatbot_id,
-                name,
-                retrieval_config
-            FROM public.knowledge_bases
-            WHERE organization_id = $1
-              AND status = 'active'
-              AND (
-                    chatbot_id = $2
-                    OR chatbot_id IS NULL
-              )
-            ORDER BY
-                CASE
-                    WHEN chatbot_id = $2 THEN 0
-                    ELSE 1
-                END,
-                updated_at DESC
-            LIMIT 1;
-        `,
-        [
-            organizationId,
-            chatbotId
-        ]
-    );
+    return findKnowledgeBaseForChatbot({
 
-    return result.rows[0] ?? null;
+        chatbotId,
+
+        organizationId
+
+    });
 
 };
 
