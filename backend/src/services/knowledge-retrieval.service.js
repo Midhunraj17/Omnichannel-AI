@@ -19,14 +19,19 @@ const DEFAULT_TOP_K = 8;
 
 const DEFAULT_SCORE_THRESHOLD = 0.15;
 
-const DEFAULT_CANDIDATE_MULTIPLIER = 4;
+const MAX_HYBRID_CANDIDATES = 20;
 
-const MAX_CANDIDATES = 80;
+const DEFAULT_MIN_RERANK_SCORE = 0.0;
+
+const DEFAULT_MAX_CONTEXT_CHARACTERS = 8000;
 
 
 const createError = (
+
     message,
+
     statusCode = 400
+
 ) => {
 
     const error = new Error(message);
@@ -39,17 +44,25 @@ const createError = (
 
 
 const validateUUID = (
+
     value,
+
     label
+
 ) => {
 
     if (
+
         typeof value !== 'string'
+
         || !UUID_REGEX.test(value)
+
     ) {
 
         throw createError(
+
             `Invalid ${label}.`
+
         );
 
     }
@@ -57,52 +70,116 @@ const validateUUID = (
 };
 
 
-const generateQueryEmbedding = async (
-    query,
-    fetchImpl = fetch
+const callAIService = async (
+
+    endpoint,
+
+    payload,
+
+    fetchImpl
+
 ) => {
 
-    const response = await fetchImpl(
+    let response;
 
-        `${env.aiServiceUrl}/api/v1/knowledge/embed-query`,
+    try {
 
-        {
+        response = await fetchImpl(
 
-            method: 'POST',
+            `${env.aiServiceUrl}${endpoint}`,
 
-            headers: {
+            {
 
-                'Content-Type': 'application/json',
+                method: 'POST',
 
-                Authorization:
-                    `Bearer ${env.aiServiceApiKey}`
+                headers: {
 
-            },
+                    'Content-Type': 'application/json',
 
-            body: JSON.stringify({
+                    Authorization:
 
-                query
+                        `Bearer ${env.aiServiceApiKey}`
 
-            }),
+                },
 
-            signal: AbortSignal.timeout(30000)
+                body: JSON.stringify(payload),
 
-        }
+                signal: AbortSignal.timeout(45000)
 
-    );
+            }
 
+        );
 
-    if (!response.ok) {
+    } catch (error) {
 
         throw createError(
-            'Query embedding service failed.',
+
+            'AI service is temporarily unavailable.',
+
             502
+
         );
 
     }
 
 
-    const result = await response.json();
+    if (!response.ok) {
+
+        throw createError(
+
+            `AI service request failed (${response.status}).`,
+
+            502
+
+        );
+
+    }
+
+
+    try {
+
+        return await response.json();
+
+    } catch {
+
+        throw createError(
+
+            'AI service returned an invalid response.',
+
+            502
+
+        );
+
+    }
+
+};
+
+
+// ============================================================
+// QUERY EMBEDDING
+// ============================================================
+
+const generateQueryEmbedding = async (
+
+    query,
+
+    fetchImpl
+
+) => {
+
+    const result = await callAIService(
+
+        '/api/v1/knowledge/embed-query',
+
+        {
+
+            query
+
+        },
+
+        fetchImpl
+
+    );
 
 
     if (
@@ -126,8 +203,11 @@ const generateQueryEmbedding = async (
     ) {
 
         throw createError(
+
             'Invalid query embedding returned by AI service.',
+
             502
+
         );
 
     }
@@ -136,8 +216,11 @@ const generateQueryEmbedding = async (
     if (result.model !== EMBEDDING_MODEL) {
 
         throw createError(
+
             'Query and document embedding models do not match.',
+
             503
+
         );
 
     }
@@ -149,7 +232,85 @@ const generateQueryEmbedding = async (
 
 
 // ============================================================
-// HYBRID RETRIEVAL SERVICE FACTORY
+// VALIDATE RERANKING RESPONSE
+// ============================================================
+
+const validateRerankingResponse = (
+
+    response,
+
+    topK
+
+) => {
+
+    if (
+
+        !response
+
+        || response.success !== true
+
+        || !Array.isArray(response.results)
+
+        || !Array.isArray(response.sources)
+
+        || typeof response.context !== 'string'
+
+        || response.context.length > DEFAULT_MAX_CONTEXT_CHARACTERS
+
+    ) {
+
+        throw createError(
+
+            'Invalid reranking response returned by AI service.',
+
+            502
+
+        );
+
+    }
+
+
+    if (response.results.length > topK) {
+
+        throw createError(
+
+            'AI service returned too many reranked documents.',
+
+            502
+
+        );
+
+    }
+
+
+    if (
+
+        !Number.isInteger(response.context_document_count)
+
+        || response.context_document_count < 0
+
+        || response.context_document_count > topK
+
+    ) {
+
+        throw createError(
+
+            'Invalid context document count.',
+
+            502
+
+        );
+
+    }
+
+
+    return response;
+
+};
+
+
+// ============================================================
+// HYBRID + RERANKING SERVICE FACTORY
 // ============================================================
 
 export const createKnowledgeRetrievalService = ({
@@ -171,24 +332,32 @@ export const createKnowledgeRetrievalService = ({
 
         topK = DEFAULT_TOP_K,
 
-        scoreThreshold = DEFAULT_SCORE_THRESHOLD
+        scoreThreshold = DEFAULT_SCORE_THRESHOLD,
+
+        minRerankScore = DEFAULT_MIN_RERANK_SCORE
 
     }) => {
 
 
         // ----------------------------------------------------
-        // 1. VALIDATE IDENTIFIERS
+        // 1. VALIDATE ORGANIZATION AND KNOWLEDGE BASE
         // ----------------------------------------------------
 
         validateUUID(
+
             organizationId,
+
             'organization ID'
+
         );
 
 
         validateUUID(
+
             knowledgeBaseId,
+
             'knowledge base ID'
+
         );
 
 
@@ -207,7 +376,9 @@ export const createKnowledgeRetrievalService = ({
         ) {
 
             throw createError(
+
                 'Query must contain 1–5000 characters.'
+
             );
 
         }
@@ -226,12 +397,14 @@ export const createKnowledgeRetrievalService = ({
 
             || topK < 1
 
-            || topK > 20
+            || topK > 8
 
         ) {
 
             throw createError(
-                'top_k must be between 1 and 20.'
+
+                'top_k must be between 1 and 8.'
+
             );
 
         }
@@ -254,14 +427,41 @@ export const createKnowledgeRetrievalService = ({
         ) {
 
             throw createError(
+
                 'score_threshold must be between 0 and 1.'
+
             );
 
         }
 
 
         // ----------------------------------------------------
-        // 5. VERIFY KNOWLEDGE BASE OWNERSHIP
+        // 5. VALIDATE RERANKING THRESHOLD
+        // ----------------------------------------------------
+
+        if (
+
+            typeof minRerankScore !== 'number'
+
+            || !Number.isFinite(minRerankScore)
+
+            || minRerankScore < 0
+
+            || minRerankScore > 1
+
+        ) {
+
+            throw createError(
+
+                'min_rerank_score must be between 0 and 1.'
+
+            );
+
+        }
+
+
+        // ----------------------------------------------------
+        // 6. VERIFY KNOWLEDGE BASE OWNERSHIP
         // ----------------------------------------------------
 
         const knowledgeBaseResult = await database.query(
@@ -300,15 +500,18 @@ export const createKnowledgeRetrievalService = ({
         if (!knowledgeBaseResult.rowCount) {
 
             throw createError(
+
                 'Knowledge base not found or inactive.',
+
                 404
+
             );
 
         }
 
 
         // ----------------------------------------------------
-        // 6. GENERATE QUERY EMBEDDING
+        // 7. GENERATE QUERY EMBEDDING
         // ----------------------------------------------------
 
         const embedding = await generateQueryEmbedding(
@@ -326,29 +529,19 @@ export const createKnowledgeRetrievalService = ({
 
 
         // ----------------------------------------------------
-        // 7. CALCULATE CANDIDATE COUNT
+        // 8. HYBRID RETRIEVAL
         // ----------------------------------------------------
 
         const candidateCount = Math.min(
 
-            MAX_CANDIDATES,
+            MAX_HYBRID_CANDIDATES,
 
-            Math.max(
-
-                topK,
-
-                topK * DEFAULT_CANDIDATE_MULTIPLIER
-
-            )
+            topK * 4
 
         );
 
 
-        // ----------------------------------------------------
-        // 8. EXECUTE HYBRID RETRIEVAL
-        // ----------------------------------------------------
-
-        const result = await database.query(
+        const hybridResult = await database.query(
 
             `
 
@@ -412,7 +605,7 @@ export const createKnowledgeRetrievalService = ({
 
                 normalizedQuery,
 
-                topK,
+                candidateCount,
 
                 scoreThreshold,
 
@@ -424,10 +617,93 @@ export const createKnowledgeRetrievalService = ({
 
 
         // ----------------------------------------------------
-        // 9. RETURN HYBRID RESULTS
+        // 9. HANDLE EMPTY RETRIEVAL
+        // ----------------------------------------------------
+
+        if (!hybridResult.rowCount) {
+
+            return {
+
+                success: true,
+
+                knowledge_base_id: knowledgeBaseId,
+
+                query: normalizedQuery,
+
+                retrieval_method: 'hybrid_rrf',
+
+                reranking_method: 'cohere_rerank',
+
+                candidate_count: 0,
+
+                result_count: 0,
+
+                results: [],
+
+                context: '',
+
+                context_character_count: 0,
+
+                context_document_count: 0,
+
+                sources: [],
+
+                context_truncated: false
+
+            };
+
+        }
+
+
+        // ----------------------------------------------------
+        // 10. RERANK HYBRID CANDIDATES
+        // ----------------------------------------------------
+
+        const rerankingResult = await callAIService(
+
+            '/api/v1/knowledge/rerank-context',
+
+            {
+
+                query: normalizedQuery,
+
+                documents: hybridResult.rows,
+
+                top_n: topK,
+
+                min_relevance_score: minRerankScore,
+
+                max_context_characters:
+
+                    DEFAULT_MAX_CONTEXT_CHARACTERS
+
+            },
+
+            fetchImpl
+
+        );
+
+
+        // ----------------------------------------------------
+        // 11. VALIDATE RERANKING RESPONSE
+        // ----------------------------------------------------
+
+        const validatedResult = validateRerankingResponse(
+
+            rerankingResult,
+
+            topK
+
+        );
+
+
+        // ----------------------------------------------------
+        // 12. RETURN COMPLETE RETRIEVAL RESULT
         // ----------------------------------------------------
 
         return {
+
+            success: true,
 
             knowledge_base_id: knowledgeBaseId,
 
@@ -435,13 +711,31 @@ export const createKnowledgeRetrievalService = ({
 
             retrieval_method: 'hybrid_rrf',
 
+            reranking_method: 'cohere_rerank',
+
             embedding_model: EMBEDDING_MODEL,
 
-            result_count: result.rowCount,
+            candidate_count: hybridResult.rowCount,
 
-            candidate_count: candidateCount,
+            result_count: validatedResult.results.length,
 
-            results: result.rows
+            results: validatedResult.results,
+
+            context: validatedResult.context,
+
+            context_character_count:
+
+                validatedResult.context_character_count,
+
+            context_document_count:
+
+                validatedResult.context_document_count,
+
+            sources: validatedResult.sources,
+
+            context_truncated:
+
+                validatedResult.context_truncated
 
         };
 

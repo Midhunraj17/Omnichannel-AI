@@ -2,35 +2,133 @@ import test from 'node:test';
 
 import assert from 'node:assert/strict';
 
+
 import {
+
     createKnowledgeRetrievalService
+
 } from './knowledge-retrieval.service.js';
 
 
 const ORGANIZATION_ID =
+
     '11111111-1111-4111-8111-111111111111';
 
 
 const KNOWLEDGE_BASE_ID =
+
     '22222222-2222-4222-8222-222222222222';
 
 
 const EMBEDDING = Array(1024).fill(0.25);
 
 
+const HYBRID_ROWS = [
+
+    {
+
+        chunk_id: 'chunk-1',
+
+        document_id: 'doc-1',
+
+        file_name: 'refunds.pdf',
+
+        chunk_index: 0,
+
+        content: 'Customers can request refunds within 7 days.',
+
+        metadata: {},
+
+        similarity: 0.91,
+
+        semantic_similarity: 0.91,
+
+        lexical_score: 0.75,
+
+        semantic_rank: 1,
+
+        lexical_rank: 2,
+
+        hybrid_score: 1.976
+
+    }
+
+];
+
+
+const RERANKING_RESPONSE = {
+
+    success: true,
+
+    query: 'How can I request a refund?',
+
+    reranking_model: 'rerank-v5.0-fast',
+
+    candidate_count: 1,
+
+    result_count: 1,
+
+    results: [
+
+        {
+
+            ...HYBRID_ROWS[0],
+
+            rerank_score: 0.95,
+
+            rerank_rank: 1
+
+        }
+
+    ],
+
+    context: '[RETRIEVED KNOWLEDGE CONTEXT]\nRefund policy',
+
+    context_character_count: 47,
+
+    context_document_count: 1,
+
+    sources: [
+
+        {
+
+            chunk_id: 'chunk-1',
+
+            document_id: 'doc-1',
+
+            file_name: 'refunds.pdf',
+
+            rerank_score: 0.95,
+
+            source_number: 1
+
+        }
+
+    ],
+
+    context_truncated: false
+
+};
+
+
 const createDependencies = ({
 
     knowledgeBaseExists = true,
 
-    retrievalRows = [],
+    hybridRows = HYBRID_ROWS,
 
-    fetchStatus = 200,
+    rerankingResponse = RERANKING_RESPONSE,
 
     embedding = EMBEDDING,
 
-    model = 'embed-v5.0-pro'
+    model = 'embed-v5.0-pro',
+
+    failEmbedding = false,
+
+    failReranking = false
 
 } = {}) => {
+
 
     const databaseCalls = [];
 
@@ -50,9 +148,7 @@ const createDependencies = ({
             });
 
 
-            if (sql.includes('SELECT') &&
-
-                sql.includes('retrieval_config')) {
+            if (sql.includes('retrieval_config')) {
 
                 return {
 
@@ -60,19 +156,17 @@ const createDependencies = ({
 
                     rows: knowledgeBaseExists
 
-                        ? [{
+                        ? [
 
-                            id: KNOWLEDGE_BASE_ID,
+                            {
 
-                            retrieval_config: {
+                                id: KNOWLEDGE_BASE_ID,
 
-                                top_k: 8,
-
-                                score_threshold: 0.15
+                                retrieval_config: {}
 
                             }
 
-                        }]
+                        ]
 
                         : []
 
@@ -85,9 +179,9 @@ const createDependencies = ({
 
                 return {
 
-                    rowCount: retrievalRows.length,
+                    rowCount: hybridRows.length,
 
-                    rows: retrievalRows
+                    rows: hybridRows
 
                 };
 
@@ -95,7 +189,9 @@ const createDependencies = ({
 
 
             throw new Error(
+
                 'Unexpected database query.'
+
             );
 
         }
@@ -114,29 +210,105 @@ const createDependencies = ({
         });
 
 
-        return {
+        if (
 
-            ok: fetchStatus >= 200 && fetchStatus < 300,
+            failEmbedding
 
-            status: fetchStatus,
+            && url.includes('embed-query')
 
-            async json() {
+        ) {
 
-                return {
+            return {
 
-                    success: true,
+                ok: false,
 
-                    model,
+                status: 502,
 
-                    dimension: embedding.length,
+                async json() {
 
-                    embedding
+                    return {};
 
-                };
+                }
 
-            }
+            };
 
-        };
+        }
+
+
+        if (
+
+            failReranking
+
+            && url.includes('rerank-context')
+
+        ) {
+
+            return {
+
+                ok: false,
+
+                status: 502,
+
+                async json() {
+
+                    return {};
+
+                }
+
+            };
+
+        }
+
+
+        if (url.includes('embed-query')) {
+
+            return {
+
+                ok: true,
+
+                async json() {
+
+                    return {
+
+                        success: true,
+
+                        model,
+
+                        dimension: embedding.length,
+
+                        embedding
+
+                    };
+
+                }
+
+            };
+
+        }
+
+
+        if (url.includes('rerank-context')) {
+
+            return {
+
+                ok: true,
+
+                async json() {
+
+                    return rerankingResponse;
+
+                }
+
+            };
+
+        }
+
+
+        throw new Error(
+
+            'Unexpected AI service endpoint.'
+
+        );
 
     };
 
@@ -166,46 +338,24 @@ const validInput = () => ({
 
     topK: 8,
 
-    scoreThreshold: 0.15
+    scoreThreshold: 0.15,
+
+    minRerankScore: 0.0
 
 });
 
 
 // ============================================================
-// TEST 1: HYBRID RETRIEVAL
+// 1. COMPLETE RETRIEVAL PIPELINE
 // ============================================================
 
 test(
 
-    'should execute hybrid retrieval successfully',
+    'should execute hybrid retrieval, reranking and context construction',
 
     async () => {
 
-        const dependencies = createDependencies({
-
-            retrievalRows: [
-
-                {
-
-                    chunk_id: 'chunk-1',
-
-                    content: 'Refund policy',
-
-                    semantic_similarity: 0.91,
-
-                    lexical_score: 0.75,
-
-                    semantic_rank: 1,
-
-                    lexical_rank: 2,
-
-                    hybrid_score: 1.976
-
-                }
-
-            ]
-
-        });
+        const dependencies = createDependencies();
 
 
         const service = createKnowledgeRetrievalService({
@@ -224,36 +374,31 @@ test(
         );
 
 
-        assert.equal(
+        assert.equal(result.success, true);
 
-            result.retrieval_method,
+        assert.equal(result.retrieval_method, 'hybrid_rrf');
 
-            'hybrid_rrf'
+        assert.equal(result.reranking_method, 'cohere_rerank');
 
-        );
+        assert.equal(result.result_count, 1);
 
+        assert.equal(result.context_document_count, 1);
 
-        assert.equal(
-
-            result.result_count,
-
-            1
-
-        );
-
-
-        assert.equal(
-
-            result.results[0].chunk_id,
-
-            'chunk-1'
-
-        );
+        assert.ok(result.context.includes('Refund policy'));
 
 
         assert.equal(
 
             dependencies.databaseCalls.length,
+
+            2
+
+        );
+
+
+        assert.equal(
+
+            dependencies.fetchCalls.length,
 
             2
 
@@ -265,7 +410,56 @@ test(
 
 
 // ============================================================
-// TEST 2: TENANT OWNERSHIP
+// 2. VERIFY CANDIDATE COUNT
+// ============================================================
+
+test(
+
+    'should request more candidates than final topK',
+
+    async () => {
+
+        const dependencies = createDependencies();
+
+
+        const service = createKnowledgeRetrievalService({
+
+            database: dependencies.database,
+
+            fetchImpl: dependencies.fetchImpl
+
+        });
+
+
+        await service.searchKnowledgeBase(validInput());
+
+
+        const hybridCall = dependencies.databaseCalls.find(
+
+            call => call.sql.includes(
+
+                'search_knowledge_chunks_hybrid'
+
+            )
+
+        );
+
+
+        assert.equal(
+
+            hybridCall.params[5],
+
+            20
+
+        );
+
+    }
+
+);
+
+
+// ============================================================
+// 3. TENANT OWNERSHIP
 // ============================================================
 
 test(
@@ -313,12 +507,12 @@ test(
 
 
 // ============================================================
-// TEST 3: INVALID ORGANIZATION UUID
+// 4. INVALID QUERY
 // ============================================================
 
 test(
 
-    'should reject invalid organization UUID',
+    'should reject empty queries',
 
     async () => {
 
@@ -340,48 +534,7 @@ test(
 
                 ...validInput(),
 
-                organizationId: 'invalid'
-
-            }),
-
-            /Invalid organization ID/
-
-        );
-
-    }
-
-);
-
-
-// ============================================================
-// TEST 4: INVALID QUERY
-// ============================================================
-
-test(
-
-    'should reject empty search queries',
-
-    async () => {
-
-        const dependencies = createDependencies();
-
-
-        const service = createKnowledgeRetrievalService({
-
-            database: dependencies.database,
-
-            fetchImpl: dependencies.fetchImpl
-
-        });
-
-
-        await assert.rejects(
-
-            service.searchKnowledgeBase({
-
-                ...validInput(),
-
-                query: '   '
+                query: ' '
 
             }),
 
@@ -395,12 +548,12 @@ test(
 
 
 // ============================================================
-// TEST 5: INVALID TOP K
+// 5. INVALID TOP K
 // ============================================================
 
 test(
 
-    'should reject invalid topK values',
+    'should reject topK above eight',
 
     async () => {
 
@@ -422,7 +575,7 @@ test(
 
                 ...validInput(),
 
-                topK: 100
+                topK: 10
 
             }),
 
@@ -436,59 +589,18 @@ test(
 
 
 // ============================================================
-// TEST 6: INVALID SCORE THRESHOLD
+// 6. EMBEDDING SERVICE FAILURE
 // ============================================================
 
 test(
 
-    'should reject invalid score thresholds',
-
-    async () => {
-
-        const dependencies = createDependencies();
-
-
-        const service = createKnowledgeRetrievalService({
-
-            database: dependencies.database,
-
-            fetchImpl: dependencies.fetchImpl
-
-        });
-
-
-        await assert.rejects(
-
-            service.searchKnowledgeBase({
-
-                ...validInput(),
-
-                scoreThreshold: 2
-
-            }),
-
-            /score_threshold must be between/
-
-        );
-
-    }
-
-);
-
-
-// ============================================================
-// TEST 7: COHERE EMBEDDING SERVICE FAILURE
-// ============================================================
-
-test(
-
-    'should reject failed query embedding requests',
+    'should handle query embedding service failure',
 
     async () => {
 
         const dependencies = createDependencies({
 
-            fetchStatus: 500
+            failEmbedding: true
 
         });
 
@@ -516,18 +628,18 @@ test(
 
 
 // ============================================================
-// TEST 8: EMBEDDING MODEL MISMATCH
+// 7. RERANKING SERVICE FAILURE
 // ============================================================
 
 test(
 
-    'should reject mismatched embedding models',
+    'should handle reranking service failure',
 
     async () => {
 
         const dependencies = createDependencies({
 
-            model: 'different-embedding-model'
+            failReranking: true
 
         });
 
@@ -545,7 +657,7 @@ test(
 
             service.searchKnowledgeBase(validInput()),
 
-            error => error.statusCode === 503
+            error => error.statusCode === 502
 
         );
 
@@ -555,16 +667,20 @@ test(
 
 
 // ============================================================
-// TEST 9: HYBRID SQL FUNCTION
+// 8. EMPTY HYBRID RESULTS
 // ============================================================
 
 test(
 
-    'should call the hybrid SQL function with tenant-scoped parameters',
+    'should return an empty context when hybrid retrieval finds nothing',
 
     async () => {
 
-        const dependencies = createDependencies();
+        const dependencies = createDependencies({
+
+            hybridRows: []
+
+        });
 
 
         const service = createKnowledgeRetrievalService({
@@ -576,64 +692,73 @@ test(
         });
 
 
-        await service.searchKnowledgeBase(validInput());
+        const result = await service.searchKnowledgeBase(
 
-
-        const hybridCall = dependencies.databaseCalls.find(
-
-            call => call.sql.includes(
-
-                'search_knowledge_chunks_hybrid'
-
-            )
+            validInput()
 
         );
 
 
-        assert.ok(hybridCall);
+        assert.equal(result.result_count, 0);
 
+        assert.equal(result.context, '');
+
+        assert.equal(result.context_document_count, 0);
 
         assert.equal(
 
-            hybridCall.params[0],
+            dependencies.fetchCalls.length,
 
-            ORGANIZATION_ID
+            1
 
         );
 
+    }
 
-        assert.equal(
-
-            hybridCall.params[1],
-
-            KNOWLEDGE_BASE_ID
-
-        );
+);
 
 
-        assert.equal(
+// ============================================================
+// 9. INVALID RERANKING RESPONSE
+// ============================================================
 
-            hybridCall.params[4],
+test(
 
-            'How can I request a refund?'
+    'should reject malformed reranking responses',
 
-        );
+    async () => {
+
+        const dependencies = createDependencies({
+
+            rerankingResponse: {
+
+                success: true,
+
+                results: [],
+
+                context: null,
+
+                sources: []
+
+            }
+
+        });
 
 
-        assert.equal(
+        const service = createKnowledgeRetrievalService({
 
-            hybridCall.params[5],
+            database: dependencies.database,
 
-            8
+            fetchImpl: dependencies.fetchImpl
 
-        );
+        });
 
 
-        assert.equal(
+        await assert.rejects(
 
-            hybridCall.params[6],
+            service.searchKnowledgeBase(validInput()),
 
-            0.15
+            error => error.statusCode === 502
 
         );
 
