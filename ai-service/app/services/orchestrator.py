@@ -397,6 +397,16 @@ def orchestrate(
             contextual_result.contextual_context
         ),
 
+        # PHASE 5.9 — RAG CONTEXT FORWARDING
+
+        knowledge_base_enabled=(
+            request.knowledge_base_enabled
+        ),
+
+        knowledge_context=(
+            request.knowledge_context
+        ),
+
     )
 
     try:

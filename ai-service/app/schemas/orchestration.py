@@ -1,6 +1,10 @@
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    field_validator,
+)
 
 from app.schemas.entities import (
     EntityDomain,
@@ -27,6 +31,9 @@ from app.schemas.hybrid_decision import (
 from app.schemas.contextual_resolution import (
     ContextualResolutionResult,
 )
+
+
+MAX_KNOWLEDGE_CONTEXT_LENGTH = 8000
 
 
 class OrchestrationHistoryMessage(BaseModel):
@@ -84,6 +91,17 @@ class OrchestrationRequest(BaseModel):
         max_length=3000,
     )
 
+    # -------------------------------------------------
+    # PHASE 5.9 — KNOWLEDGE BASE INPUT
+    # -------------------------------------------------
+
+    knowledge_base_enabled: bool = False
+
+    knowledge_context: str | None = Field(
+        default=None,
+        max_length=MAX_KNOWLEDGE_CONTEXT_LENGTH,
+    )
+
     @field_validator("message")
     @classmethod
     def message_must_not_be_blank(
@@ -114,6 +132,34 @@ class OrchestrationRequest(BaseModel):
                 if value.strip()
             )
         )
+
+    @field_validator("conversation_summary")
+    @classmethod
+    def normalize_conversation_summary(
+        cls,
+        value: str | None,
+    ) -> str | None:
+
+        if value is None:
+            return None
+
+        value = value.strip()
+
+        return value or None
+
+    @field_validator("knowledge_context")
+    @classmethod
+    def normalize_knowledge_context(
+        cls,
+        value: str | None,
+    ) -> str | None:
+
+        if value is None:
+            return None
+
+        value = value.strip()
+
+        return value or None
 
 
 class OrchestrationResponse(BaseModel):

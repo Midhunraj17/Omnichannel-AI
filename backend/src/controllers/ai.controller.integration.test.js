@@ -581,6 +581,15 @@ const createHarness = async () => {
             }
 
         }),
+        
+        findChatbotKnowledgeBaseFn: async () => null,
+
+        searchKnowledgeBaseFn: async () => ({
+            success: true,
+            context: '',
+            sources: [],
+            result_count: 0
+        }),
 
         getConversationFn,
 

@@ -7,6 +7,10 @@ import {
 } from '../services/ai.service.js';
 
 import {
+    searchKnowledgeBase
+} from '../services/knowledge-retrieval.service.js';
+
+import {
     getConversation,
     createConversation,
     getConversationHistory,
@@ -33,6 +37,36 @@ const UUID_REGEX =
 
 const DEFAULT_DOMAIN = 'general';
 
+const DEFAULT_TOP_K = 8;
+
+const DEFAULT_SCORE_THRESHOLD = 0.15;
+
+const DEFAULT_MIN_RERANK_SCORE = 0.0;
+
+const MAX_KNOWLEDGE_CONTEXT_LENGTH = 8000;
+
+
+// =====================================================
+// ERROR HELPER
+// =====================================================
+
+const createError = (
+    message,
+    statusCode = 500
+) => {
+
+    const error = new Error(message);
+
+    error.statusCode = statusCode;
+
+    return error;
+
+};
+
+
+// =====================================================
+// CHATBOT LOOKUP
+// =====================================================
 
 const findChatbot = async ({
     chatbotId,
@@ -41,24 +75,36 @@ const findChatbot = async ({
 
     const result = await pool.query(
         `
-            SELECT id, organization_id
+            SELECT
+                id,
+                organization_id
             FROM public.chatbots
             WHERE id = $1
               AND organization_id = $2
             LIMIT 1;
         `,
-        [chatbotId, organizationId]
+        [
+            chatbotId,
+            organizationId
+        ]
     );
 
     return result.rows[0] ?? null;
+
 };
 
+
+// =====================================================
+// CHATBOT SETTINGS
+// =====================================================
 
 const getChatbotSettings = async (chatbotId) => {
 
     const result = await pool.query(
         `
-            SELECT settings, system_prompt
+            SELECT
+                settings,
+                system_prompt
             FROM public.chatbot_settings
             WHERE chatbot_id = $1
             LIMIT 1;
@@ -67,6 +113,91 @@ const getChatbotSettings = async (chatbotId) => {
     );
 
     return result.rows[0] ?? {};
+
+};
+
+
+// =====================================================
+// CHATBOT KNOWLEDGE BASE LOOKUP
+// =====================================================
+
+const findChatbotKnowledgeBase = async ({
+    chatbotId,
+    organizationId
+}) => {
+
+    const result = await pool.query(
+        `
+            SELECT
+                id,
+                organization_id,
+                chatbot_id,
+                name,
+                retrieval_config
+            FROM public.knowledge_bases
+            WHERE organization_id = $1
+              AND status = 'active'
+              AND (
+                    chatbot_id = $2
+                    OR chatbot_id IS NULL
+              )
+            ORDER BY
+                CASE
+                    WHEN chatbot_id = $2 THEN 0
+                    ELSE 1
+                END,
+                updated_at DESC
+            LIMIT 1;
+        `,
+        [
+            organizationId,
+            chatbotId
+        ]
+    );
+
+    return result.rows[0] ?? null;
+
+};
+
+
+// =====================================================
+// RETRIEVAL CONFIGURATION
+// =====================================================
+
+const getRetrievalConfiguration = (knowledgeBase) => {
+
+    const config =
+        knowledgeBase?.retrieval_config ?? {};
+
+    const topK =
+        Number.isInteger(config.top_k) &&
+        config.top_k >= 1 &&
+        config.top_k <= 8
+            ? config.top_k
+            : DEFAULT_TOP_K;
+
+    const scoreThreshold =
+        typeof config.score_threshold === 'number' &&
+        Number.isFinite(config.score_threshold) &&
+        config.score_threshold >= 0 &&
+        config.score_threshold <= 1
+            ? config.score_threshold
+            : DEFAULT_SCORE_THRESHOLD;
+
+    const minRerankScore =
+        typeof config.min_rerank_score === 'number' &&
+        Number.isFinite(config.min_rerank_score) &&
+        config.min_rerank_score >= 0 &&
+        config.min_rerank_score <= 1
+            ? config.min_rerank_score
+            : DEFAULT_MIN_RERANK_SCORE;
+
+    return {
+        topK,
+        scoreThreshold,
+        minRerankScore
+    };
+
 };
 
 
@@ -79,6 +210,13 @@ export const createChatController = ({
     findChatbotFn = findChatbot,
 
     getChatbotSettingsFn = getChatbotSettings,
+
+    // The factory defaults to no Knowledge Base so existing
+    // isolated controller tests do not require a live database.
+    // The production controller explicitly injects the real lookup.
+    findChatbotKnowledgeBaseFn = async () => null,
+
+    searchKnowledgeBaseFn = searchKnowledgeBase,
 
     getConversationFn = getConversation,
 
@@ -432,7 +570,96 @@ export const createChatController = ({
 
 
             // -------------------------------------------------
-            // 11. GENERATE AI RESPONSE
+            // 11. KNOWLEDGE BASE DISCOVERY
+            // -------------------------------------------------
+
+            let knowledgeBase = null;
+
+            let knowledgeResult = null;
+
+            let knowledgeBaseEnabled = false;
+
+            let knowledgeContext = null;
+
+
+            // A chatbot may explicitly disable its Knowledge Base.
+            // Otherwise, an active associated Knowledge Base is used.
+
+            if (settings.knowledge_base_enabled !== false) {
+
+                knowledgeBase =
+                    await findChatbotKnowledgeBaseFn({
+
+                        chatbotId: chatbot.id,
+
+                        organizationId: chatbot.organization_id
+
+                    });
+
+            }
+
+
+            // -------------------------------------------------
+            // 12. KNOWLEDGE RETRIEVAL
+            // -------------------------------------------------
+
+            if (knowledgeBase) {
+
+                const retrievalConfig =
+                    getRetrievalConfiguration(knowledgeBase);
+
+
+                knowledgeResult =
+                    await searchKnowledgeBaseFn({
+
+                        organizationId:
+                            chatbot.organization_id,
+
+                        knowledgeBaseId:
+                            knowledgeBase.id,
+
+                        query:
+                            normalizedMessage,
+
+                        topK:
+                            retrievalConfig.topK,
+
+                        scoreThreshold:
+                            retrievalConfig.scoreThreshold,
+
+                        minRerankScore:
+                            retrievalConfig.minRerankScore
+
+                    });
+
+
+                if (
+                    !knowledgeResult ||
+                    knowledgeResult.success !== true ||
+                    typeof knowledgeResult.context !== 'string' ||
+                    knowledgeResult.context.length >
+                        MAX_KNOWLEDGE_CONTEXT_LENGTH ||
+                    !Array.isArray(knowledgeResult.sources)
+                ) {
+
+                    throw createError(
+                        'Knowledge retrieval returned an invalid response.',
+                        502
+                    );
+
+                }
+
+
+                knowledgeBaseEnabled = true;
+
+                knowledgeContext =
+                    knowledgeResult.context;
+
+            }
+
+
+            // -------------------------------------------------
+            // 13. GENERATE AI RESPONSE
             // -------------------------------------------------
 
             const result = await generateAIResponseFn({
@@ -443,7 +670,11 @@ export const createChatController = ({
 
                 domain,
 
-                requiredEntities
+                requiredEntities,
+
+                knowledgeBaseEnabled,
+
+                knowledgeContext
 
             });
 
@@ -462,7 +693,7 @@ export const createChatController = ({
 
 
             // -------------------------------------------------
-            // 12. PERSIST CONVERSATION TURN
+            // 14. PERSIST CONVERSATION TURN
             // -------------------------------------------------
 
             const botResponse =
@@ -491,7 +722,7 @@ export const createChatController = ({
 
 
             // -------------------------------------------------
-            // 13. LOG AI USAGE
+            // 15. LOG AI USAGE
             // -------------------------------------------------
 
             if (
@@ -568,7 +799,47 @@ export const createChatController = ({
 
 
             // -------------------------------------------------
-            // 14. BUILD RESPONSE
+            // 16. KNOWLEDGE BASE RESPONSE METADATA
+            // -------------------------------------------------
+
+            const knowledgeBaseMetadata = knowledgeBaseEnabled
+                ? {
+
+                    enabled: true,
+
+                    knowledge_base_id: knowledgeBase.id,
+
+                    name: knowledgeBase.name,
+
+                    retrieval_method:
+                        knowledgeResult.retrieval_method,
+
+                    reranking_method:
+                        knowledgeResult.reranking_method,
+
+                    candidate_count:
+                        knowledgeResult.candidate_count,
+
+                    result_count:
+                        knowledgeResult.result_count,
+
+                    context_document_count:
+                        knowledgeResult.context_document_count,
+
+                    context_truncated:
+                        knowledgeResult.context_truncated,
+
+                    sources:
+                        knowledgeResult.sources
+
+                }
+                : {
+                    enabled: false
+                };
+
+
+            // -------------------------------------------------
+            // 17. BUILD RESPONSE
             // -------------------------------------------------
 
             const persistedBotResponse =
@@ -582,13 +853,15 @@ export const createChatController = ({
                     ? { response: persistedBotResponse }
                     : {}),
 
-                conversation_id: conversation.id
+                conversation_id: conversation.id,
+
+                knowledge_base: knowledgeBaseMetadata
 
             };
 
 
             // -------------------------------------------------
-            // 15. COMPLETE IDEMPOTENCY REQUEST
+            // 18. COMPLETE IDEMPOTENCY REQUEST
             // -------------------------------------------------
 
             await completeRequestFn({
@@ -608,7 +881,7 @@ export const createChatController = ({
 
 
             // -------------------------------------------------
-            // 16. RETURN RESPONSE
+            // 19. RETURN RESPONSE
             // -------------------------------------------------
 
             return res.status(200).json(responseBody);
@@ -631,4 +904,8 @@ export const createChatController = ({
 // PRODUCTION CONTROLLER
 // =====================================================
 
-export const chatController = createChatController();
+export const chatController = createChatController({
+
+    findChatbotKnowledgeBaseFn: findChatbotKnowledgeBase
+
+});
